@@ -107,6 +107,7 @@ class GoalieProfile(BaseModel):
 class SlateContext(BaseModel):
     slate_date: str
     source: str
+    sport: str = "NHL"
     games: list[Game]
     teams: dict[str, TeamProfile]
     players: list[PlayerProfile]
@@ -193,6 +194,7 @@ class SkaterLine(BaseModel):
     assists: int = 0
     points: int = 0
     sog: int = 0
+    stats: dict[str, float] = Field(default_factory=dict)
 
 
 class GoalieLine(BaseModel):

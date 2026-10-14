@@ -74,7 +74,7 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
         note = f"Final {box.away_abbrev} {away}, {box.home_abbrev} {home}."
         return ("WON" if won else "LOST"), float(home - away), note
 
-    if market == "PUCKLINE" and line is not None:
+    if market in {"PUCKLINE", "SPREAD"} and line is not None:
         if leg.team_abbrev == box.home_abbrev or side == "HOME":
             margin = home - away
             label = box.home_abbrev
@@ -105,19 +105,34 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
         status = _threshold(goals, line, side)
         return status, float(goals), f"{label} scored {goals} vs {side.title()} {line:.1f}."
 
-    if market in {"SOG", "POINTS", "GOALSCORER"}:
+    counted = {
+        "SOG": "sog",
+        "POINTS": "points",
+        "GOALSCORER": "goals",
+        "ANYTIME_TD": "ANYTIME_TD",
+        "PASS_YDS": "PASS_YDS",
+        "RUSH_YDS": "RUSH_YDS",
+        "REC_YDS": "REC_YDS",
+        "REBOUNDS": "REBOUNDS",
+        "ASSISTS": "ASSISTS",
+        "THREES": "THREES",
+    }
+    if market in counted:
         skater = _find_skater(box, leg.player_id, leg.target_entity)
         if skater is None:
             return "VOID", None, "Player was not in the final box score, so the leg is void."
-        if market == "SOG":
-            actual = skater.sog
-            label = "SOG"
-        elif market == "POINTS":
-            actual = skater.points
-            label = "points"
+        key = counted[market]
+        if key == "sog":
+            actual = float(skater.sog)
+        elif key == "points":
+            actual = float(skater.points)
+        elif key == "goals":
+            actual = float(skater.goals)
+        elif key in skater.stats:
+            actual = float(skater.stats[key])
         else:
-            actual = skater.goals
-            label = "goals"
+            return "VOID", None, "That stat was not in the final box score, so the leg is void."
+        label = key.replace("_", " ").lower()
         status = _threshold(actual, line if line is not None else 0.5, side if side else "YES")
         return status, float(actual), f"{skater.name} finished with {actual} {label}."
 

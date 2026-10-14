@@ -69,7 +69,7 @@ def _move_bankroll(session: Session, amount: float, kind: str, parlay_id: str, n
     )
 
 
-def save_parlay(session: Session, built: BuiltParlay, *, placed_real: bool, odds_source: str) -> Parlay:
+def save_parlay(session: Session, built: BuiltParlay, *, placed_real: bool, odds_source: str, sport: str = "NHL") -> Parlay:
     parlay_id = uuid.uuid4().hex
     row = Parlay(
         id=parlay_id,
@@ -89,6 +89,7 @@ def save_parlay(session: Session, built: BuiltParlay, *, placed_real: bool, odds
         ev=built.ev,
         synergy_notes="\n".join(built.synergy_notes),
         odds_source=odds_source,
+        sport=sport,
     )
     session.add(row)
     for index, leg in enumerate(built.legs):
@@ -113,6 +114,7 @@ def save_parlay(session: Session, built: BuiltParlay, *, placed_real: bool, odds
                 team_abbrev=leg.team_abbrev,
                 bookmaker=leg.bookmaker,
                 rationale=leg.rationale,
+                sport=sport,
             )
         )
     if placed_real and built.stake > 0:
@@ -145,7 +147,11 @@ def settle_pending(session: Session, fetch_boxscore) -> int:
                 continue
             if leg.game_id not in boxes:
                 try:
-                    boxes[leg.game_id] = fetch_boxscore(leg.game_id)
+                    sport = getattr(parlay, "sport", None) or "NHL"
+                    try:
+                        boxes[leg.game_id] = fetch_boxscore(leg.game_id, sport)
+                    except TypeError:
+                        boxes[leg.game_id] = fetch_boxscore(leg.game_id)
                 except Exception as exc:
                     boxes[leg.game_id] = None
                     leg.settlement_notes = f"Box score unavailable: {exc}"

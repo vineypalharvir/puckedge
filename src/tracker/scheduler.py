@@ -16,9 +16,13 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def run_settlement_once() -> int:
+    from src.api.espn_client import fetch_summary_box
+
     client = NHLClient()
 
-    def _fetch(game_id: str):
+    def _fetch(game_id: str, sport: str = "NHL"):
+        if sport in {"NFL", "NBA"}:
+            return fetch_summary_box(sport, game_id)
         return client.boxscore(game_id)
 
     session = open_session()

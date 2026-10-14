@@ -37,6 +37,7 @@ class Parlay(Base):
     ev: Mapped[float | None] = mapped_column(Float, nullable=True)
     synergy_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     odds_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    sport: Mapped[str] = mapped_column(String, default="NHL")
     settled_decimal_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
     settled_american_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     legs: Mapped[list[ParlayLeg]] = relationship(back_populates="parlay", cascade="all, delete-orphan")
@@ -66,6 +67,7 @@ class ParlayLeg(Base):
     team_abbrev: Mapped[str | None] = mapped_column(String, nullable=True)
     bookmaker: Mapped[str | None] = mapped_column(String, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sport: Mapped[str] = mapped_column(String, default="NHL")
     parlay: Mapped[Parlay] = relationship(back_populates="legs")
 
 

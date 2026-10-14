@@ -154,15 +154,16 @@ def cached_update_status() -> str:
     return peek_update(ROOT)
 
 
-def current_board(slate_date: date, live: bool, odds_key: str, sportsbook: str, refresh: bool) -> PricedBoard:
-    token = (slate_date.isoformat(), live, bool(odds_key), sportsbook)
+def current_board(slate_date: date, live: bool, odds_key: str, sportsbook: str, sport: str, refresh: bool) -> PricedBoard:
+    token = (slate_date.isoformat(), live, bool(odds_key), sportsbook, sport)
     if refresh or st.session_state.get("board_token") != token:
-        with st.spinner("Loading the NHL slate and pricing the board..."):
+        with st.spinner(f"Loading the {sport} slate and pricing the board..."):
             st.session_state.board = load_board(
                 slate_date.isoformat(),
                 prefer_live=live,
                 odds_api_key=odds_key or None,
                 sportsbook=sportsbook,
+                sport=sport,
             )
         st.session_state.board_token = token
         st.session_state.tickets = []
@@ -173,6 +174,9 @@ def render_sidebar() -> dict:
     st.sidebar.markdown("### PuckEdge")
     st.sidebar.caption("Local NHL board, +EV parlays, and a graded ledger.")
     st.sidebar.caption("Created by Harvir Vineypal for larping purposes.")
+    if "sport" not in st.session_state:
+        st.session_state.sport = "NHL"
+    sport = st.sidebar.radio("Sport", ["NHL", "NFL", "NBA"], horizontal=True, key="sport")
     slate_date = st.sidebar.date_input("Slate date", value=date.today())
     live = st.sidebar.toggle(
         "Live NHL feed",
@@ -227,6 +231,7 @@ def render_sidebar() -> dict:
         "live": live,
         "odds_key": odds_key.strip(),
         "sportsbook": sportsbook,
+        "sport": sport,
         "refresh": refresh,
         "balance": balance,
         "stake": float(stake),
@@ -250,9 +255,10 @@ def _record(board: PricedBoard, abbrev: str) -> str:
 
 
 def render_board(board: PricedBoard) -> None:
-    st.subheader("Today's NHL board")
+    sport = board.context.sport
+    st.subheader(f"Today's {sport} board")
     if not board.context.games:
-        st.warning("No NHL games on this date.")
+        st.warning(f"No {sport} games on this date.")
         return
     for note in board.context.notes:
         st.info(note)
@@ -267,18 +273,34 @@ def render_board(board: PricedBoard) -> None:
             (
                 leg
                 for leg in board.legs
-                if leg.game_id == game.game_id and leg.market_type == "TOTAL" and leg.side == "OVER" and leg.line in {5.5, 6.0, 6.5}
+                if leg.game_id == game.game_id and leg.market_type == "TOTAL" and leg.side == "OVER"
+                and (sport != "NHL" or leg.line in {5.5, 6.0, 6.5})
             ),
             None,
         )
+        spread = next(
+            (
+                leg
+                for leg in board.legs
+                if leg.game_id == game.game_id and leg.market_type in {"SPREAD", "PUCKLINE"} and leg.side == "HOME"
+            ),
+            None,
+        )
+        if sport == "NHL":
+            away_label = f"{game.away.name} ({_starters(board, game.away.abbrev)})"
+            home_label = f"{game.home.name} ({_starters(board, game.home.abbrev)})"
+        else:
+            away_label = game.away.name
+            home_label = game.home.name
         rows.append(
             {
                 "Start": format_start(game.start_time_utc),
                 "Matchup": f"{game.away.abbrev} @ {game.home.abbrev}",
                 "State": game.game_state,
-                "Away": f"{game.away.name} ({_starters(board, game.away.abbrev)})",
-                "Home": f"{game.home.name} ({_starters(board, game.home.abbrev)})",
+                "Away": away_label,
+                "Home": home_label,
                 "Form": f"{away.abbrev if away else game.away.abbrev}: {_record(board, game.away.abbrev)} | {home.abbrev if home else game.home.abbrev}: {_record(board, game.home.abbrev)}",
+                "Spread": spread.selection if spread else "—",
                 "Moneyline": (
                     f"{game.away.abbrev} {format_american(away_ml.american_odds) if away_ml else '—'} / "
                     f"{game.home.abbrev} {format_american(home_ml.american_odds) if home_ml else '—'}"
@@ -303,8 +325,10 @@ def render_builder(board: PricedBoard, balance: float, stake: float) -> None:
         "Krazy": "4–8 legs · $1 returns $100 or more · dogs, anytime goals, wild props. The suggestion is a tiny slice of bankroll. Your target wager can be anything.",
     }
     if not board.context.games:
-        st.warning("No NHL games on this date.")
+        st.warning(f"No {board.context.sport} games on this date.")
         return
+    if board.context.sport != "NHL":
+        st.caption(f"{board.context.sport} tickets use moneylines, spreads, totals, and player props.")
     tier = st.radio(
         "Risk profile",
         list(PROFILES),
@@ -440,7 +464,7 @@ def render_ticket(ticket: BuiltParlay, index: int, odds_source: str) -> None:
 def _persist(ticket: BuiltParlay, *, placed_real: bool, odds_source: str, signature: tuple) -> None:
     session = open_session()
     try:
-        save_parlay(session, ticket, placed_real=placed_real, odds_source=odds_source)
+        save_parlay(session, ticket, placed_real=placed_real, odds_source=odds_source, sport=st.session_state.get("sport", "NHL"))
     finally:
         session.close()
     st.session_state.saved_signatures.add(signature)
@@ -467,6 +491,7 @@ def render_ledger() -> None:
         [
             {
                 "When": row.created_at.strftime("%b %d, %I:%M %p"),
+                "Sport": getattr(row, "sport", None) or "NHL",
                 "Tier": row.risk_tier,
                 "Odds": format_american(row.total_american_odds),
                 "Stake": money(row.stake_amount),
@@ -672,7 +697,7 @@ def main() -> None:
         """
         <div class="hero">
             <h1>PUCK<span>EDGE</span></h1>
-            <p>NHL edge, Bet365-compatible prices, and a ledger that grades every ticket.</p>
+            <p>NHL, NFL, and NBA edge, with a ledger that grades every ticket.</p>
             <p class="credit">Created by Harvir Vineypal for larping purposes.</p>
         </div>
         """,
@@ -684,10 +709,11 @@ def main() -> None:
         controls["live"],
         controls["odds_key"],
         controls["sportsbook"],
+        controls["sport"],
         controls["refresh"],
     )
     builder, boost, slate, ledger, analytics = st.tabs(
-        ["Parlay Builder", "Bet Boost", "NHL Board", "Ledger", "Analytics"]
+        ["Parlay Builder", "Bet Boost", f"{controls['sport']} Board", "Ledger", "Analytics"]
     )
     with builder:
         render_builder(board, controls["balance"], controls["stake"])

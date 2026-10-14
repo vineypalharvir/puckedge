@@ -88,7 +88,7 @@ def _event_books(bookmakers: list[dict]) -> list[dict]:
     return books
 
 
-def parse_odds_payload(payload: list | dict, games: list[Game]) -> list[Offer]:
+def parse_odds_payload(payload: list | dict, games: list[Game], spread_type: str = "PUCKLINE") -> list[Offer]:
     events = payload if isinstance(payload, list) else payload.get("data") or payload.get("events") or []
     offers: list[Offer] = []
     for event in events:
@@ -105,7 +105,7 @@ def parse_odds_payload(payload: list | dict, games: list[Game]) -> list[Offer]:
                 elif key in {"h2h_3_way", "h2h_3way"}:
                     offers.extend(_moneyline_outcomes(game, outcomes, book_key, "MONEYLINE_REG"))
                 elif key == "spreads":
-                    offers.extend(_spread_outcomes(game, outcomes, book_key))
+                    offers.extend(_spread_outcomes(game, outcomes, book_key, spread_type))
                 elif key == "totals":
                     offers.extend(_total_outcomes(game, outcomes, book_key))
     return offers
@@ -151,7 +151,7 @@ def _moneyline_outcomes(game: Game, outcomes: list[dict], book: str, market_type
     return offers
 
 
-def _spread_outcomes(game: Game, outcomes: list[dict], book: str) -> list[Offer]:
+def _spread_outcomes(game: Game, outcomes: list[dict], book: str, market_type: str = "PUCKLINE") -> list[Offer]:
     offers = []
     for outcome in outcomes:
         mapped = _side_for_name(game, str(outcome.get("name") or ""))
@@ -167,8 +167,8 @@ def _spread_outcomes(game: Game, outcomes: list[dict], book: str) -> list[Offer]
         offers.append(
             _offer(
                 game,
-                market_type="PUCKLINE",
-                market_key=f"{game.game_id}|PUCKLINE|{abs(line):.1f}",
+                market_type=market_type,
+                market_key=f"{game.game_id}|{market_type}|{abs(line):.1f}",
                 target=team.name,
                 selection=f"{team.name} {line:+.1f}",
                 side=side,
@@ -209,6 +209,20 @@ def _total_outcomes(game: Game, outcomes: list[dict], book: str) -> list[Offer]:
     return offers
 
 
+PROP_KEY_MAP = {
+    "player_anytime_td": "ANYTIME_TD",
+    "player_pass_yds": "PASS_YDS",
+    "player_rush_yds": "RUSH_YDS",
+    "player_reception_yds": "REC_YDS",
+    "player_points": "POINTS",
+    "player_rebounds": "REBOUNDS",
+    "player_assists": "ASSISTS",
+    "player_threes": "THREES",
+    "player_shots_on_goal": "SOG",
+    "player_goal_scorer_anytime": "GOALSCORER",
+}
+
+
 def parse_prop_payload(payload: dict, game: Game, players: list[PlayerProfile]) -> list[Offer]:
     by_name = {_norm_name(player.name): player for player in players if player.team_abbrev in {game.home.abbrev, game.away.abbrev}}
     offers: list[Offer] = []
@@ -216,22 +230,25 @@ def parse_prop_payload(payload: dict, game: Game, players: list[PlayerProfile]) 
         book_key = str(book.get("key") or "consensus")
         for market in book.get("markets") or []:
             key = market.get("key")
+            market_type = PROP_KEY_MAP.get(key)
+            if market_type is None:
+                continue
             for outcome in market.get("outcomes") or []:
                 description = str(outcome.get("description") or outcome.get("name") or "")
                 player = by_name.get(_norm_name(description)) or by_name.get(_norm_name(str(outcome.get("name") or "")))
                 if player is None or outcome.get("price") is None:
                     continue
                 price = int(outcome["price"])
-                point = outcome.get("point")
                 opponent = game.away.abbrev if player.team_abbrev == game.home.abbrev else game.home.abbrev
-                if key == "player_goal_scorer_anytime":
+                if market_type in {"GOALSCORER", "ANYTIME_TD"}:
+                    label = "anytime goal" if market_type == "GOALSCORER" else "anytime TD"
                     offers.append(
                         _offer(
                             game,
-                            market_type="GOALSCORER",
-                            market_key=f"{game.game_id}|GOALSCORER|{player.player_id}|0.5",
+                            market_type=market_type,
+                            market_key=f"{game.game_id}|{market_type}|{player.player_id}|0.5",
                             target=player.name,
-                            selection=f"{player.name} anytime goal",
+                            selection=f"{player.name} {label}",
                             side="YES",
                             line=0.5,
                             american=price,
@@ -242,26 +259,19 @@ def parse_prop_payload(payload: dict, game: Game, players: list[PlayerProfile]) 
                         )
                     )
                     continue
-                if point is None:
+                if outcome.get("point") is None:
                     continue
+                line = float(outcome["point"])
                 side_name = str(outcome.get("name") or "")
                 side = "OVER" if side_name.casefold().startswith("over") else "UNDER" if side_name.casefold().startswith("under") else "YES"
-                line = float(point)
-                if key == "player_shots_on_goal":
-                    market_type = "SOG"
-                    label = f"{player.name} {side.title()} {line:.1f} SOG"
-                elif key == "player_points":
-                    market_type = "POINTS"
-                    label = f"{player.name} {side.title()} {line:.1f} points"
-                else:
-                    continue
+                unit = " SOG" if market_type == "SOG" else " points" if market_type == "POINTS" else ""
                 offers.append(
                     _offer(
                         game,
                         market_type=market_type,
                         market_key=f"{game.game_id}|{market_type}|{player.player_id}|{line:.1f}",
                         target=player.name,
-                        selection=label,
+                        selection=f"{player.name} {side.title()} {line:.1f}{unit}",
                         side=side,
                         line=line,
                         american=price,
@@ -290,19 +300,34 @@ def offers_for_book(offers: list[Offer], sportsbook: str) -> list[Offer]:
     return [offer for offer in offers if offer.bookmaker == sportsbook]
 
 
+SPORT_KEYS = {
+    "NHL": "icehockey_nhl",
+    "NFL": "americanfootball_nfl",
+    "NBA": "basketball_nba",
+}
+PROP_MARKETS = {
+    "NHL": "player_points,player_shots_on_goal,player_goal_scorer_anytime",
+    "NFL": "player_pass_yds,player_rush_yds,player_reception_yds,player_anytime_td",
+    "NBA": "player_points,player_rebounds,player_assists,player_threes",
+}
+
+
 def fetch_live_offers(
     games: list[Game],
     players: list[PlayerProfile],
     api_key: str,
     region: str | None = None,
+    sport: str = "NHL",
 ) -> list[Offer]:
     if not api_key or not games:
         return []
     region = region or ODDS_API_REGIONS
+    sport_key = SPORT_KEYS.get(sport, SPORT_KEYS["NHL"])
+    spread_type = "PUCKLINE" if sport == "NHL" else "SPREAD"
     offers: list[Offer] = []
     try:
         payload = get_json(
-            f"{ODDS_API_BASE}/sports/icehockey_nhl/odds",
+            f"{ODDS_API_BASE}/sports/{sport_key}/odds",
             params={
                 "apiKey": api_key,
                 "regions": region,
@@ -311,14 +336,14 @@ def fetch_live_offers(
             },
             ttl_seconds=180,
         )
-        offers.extend(parse_odds_payload(payload, games))
+        offers.extend(parse_odds_payload(payload, games, spread_type))
     except Exception as exc:
         logger.warning("Odds API game lines failed: %s", exc)
         return []
 
     try:
         events = get_json(
-            f"{ODDS_API_BASE}/sports/icehockey_nhl/events",
+            f"{ODDS_API_BASE}/sports/{sport_key}/events",
             params={"apiKey": api_key},
             ttl_seconds=180,
         )
@@ -333,11 +358,11 @@ def fetch_live_offers(
             continue
         try:
             props = get_json(
-                f"{ODDS_API_BASE}/sports/icehockey_nhl/events/{event['id']}/odds",
+                f"{ODDS_API_BASE}/sports/{sport_key}/events/{event['id']}/odds",
                 params={
                     "apiKey": api_key,
                     "regions": region,
-                    "markets": "player_points,player_shots_on_goal,player_goal_scorer_anytime",
+                    "markets": PROP_MARKETS.get(sport, PROP_MARKETS["NHL"]),
                     "oddsFormat": "american",
                 },
                 ttl_seconds=180,

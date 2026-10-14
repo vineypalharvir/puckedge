@@ -37,7 +37,7 @@ PROFILES: dict[str, RiskProfile] = {
 
 def market_allowed(leg: MarketLeg, profile: RiskProfile) -> bool:
     if profile.key == "Conservative":
-        if leg.market_type == "PUCKLINE" and (leg.line or 0) > 0:
+        if leg.market_type in {"PUCKLINE", "SPREAD"} and (leg.line or 0) > 0:
             return True
         if leg.market_type == "TEAM_TOTAL" and leg.side == "OVER" and (leg.line or 9) <= 1.5:
             return True
@@ -49,15 +49,15 @@ def market_allowed(leg: MarketLeg, profile: RiskProfile) -> bool:
             return True
         if leg.market_type == "TOTAL":
             return True
-        if leg.market_type in {"SOG", "POINTS"} and leg.side == "OVER":
+        if leg.market_type in {"SOG", "POINTS", "PASS_YDS", "RUSH_YDS", "REC_YDS", "REBOUNDS", "ASSISTS", "THREES"} and leg.side == "OVER":
             return True
         return False
     if profile.key == "Aggressive":
-        if leg.market_type == "PUCKLINE" and (leg.line or 0) < 0:
+        if leg.market_type in {"PUCKLINE", "SPREAD"} and (leg.line or 0) < 0:
             return True
         if leg.market_type == "MONEYLINE" and leg.american_odds > 0:
             return True
-        if leg.market_type == "GOALSCORER" and leg.side == "YES" and (leg.line or 1) <= 0.5:
+        if leg.market_type in {"GOALSCORER", "ANYTIME_TD"} and leg.side == "YES" and (leg.line or 1) <= 0.5:
             return True
         if leg.market_type == "TEAM_TOTAL" and leg.side == "OVER" and (leg.line or 0) >= 3.5:
             return True
@@ -65,13 +65,13 @@ def market_allowed(leg: MarketLeg, profile: RiskProfile) -> bool:
             return True
         return False
     if profile.key == "Moonshot":
-        if leg.market_type == "GOALSCORER" and leg.side == "YES":
+        if leg.market_type in {"GOALSCORER", "ANYTIME_TD"} and leg.side == "YES":
             return True
         if leg.side in {"OVER", "YES", "HOME", "AWAY"} and leg.american_odds >= -160:
             return True
         return False
     if profile.key == "Krazy":
-        if leg.market_type == "GOALSCORER" and leg.side == "YES":
+        if leg.market_type in {"GOALSCORER", "ANYTIME_TD"} and leg.side == "YES":
             return True
         if leg.side in {"OVER", "YES", "HOME", "AWAY"} and leg.american_odds >= -150:
             return True

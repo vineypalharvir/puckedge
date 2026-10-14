@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config import database_path
@@ -33,10 +33,22 @@ def configure(db_path: Path | None = None) -> sessionmaker[Session]:
         cursor.close()
 
     Base.metadata.create_all(engine)
+    _ensure_sport_column(engine)
     _engine = engine
     _bound = path
     _Session = sessionmaker(bind=engine, expire_on_commit=False)
     return _Session
+
+
+def _ensure_sport_column(engine) -> None:
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        for table in ("parlays", "parlay_legs"):
+            if not inspector.has_table(table):
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table)}
+            if "sport" not in columns:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN sport VARCHAR DEFAULT 'NHL'"))
 
 
 def open_session(db_path: Path | None = None) -> Session:

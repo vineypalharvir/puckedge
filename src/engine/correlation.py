@@ -20,12 +20,19 @@ def pair_conflicts(left: MarketLeg, right: MarketLeg) -> bool:
             return True
         if {left.side, right.side} <= {"HOME", "AWAY"} and left.team_abbrev != right.team_abbrev:
             return True
-    if left.market_type == "PUCKLINE" and right.market_type == "MONEYLINE":
+    spreads = {"PUCKLINE", "SPREAD"}
+    if left.market_type in spreads and right.market_type == "MONEYLINE":
         if left.line is not None and left.line < 0 and left.team_abbrev != right.team_abbrev and right.side in {"HOME", "AWAY"}:
             return True
-    if right.market_type == "PUCKLINE" and left.market_type == "MONEYLINE":
+    if right.market_type in {"PUCKLINE", "SPREAD"} and left.market_type == "MONEYLINE":
         return pair_conflicts(right, left)
-    if left.team_abbrev and left.team_abbrev == right.team_abbrev and {left.market_type, right.market_type} == {"MONEYLINE", "PUCKLINE"}:
+    if (
+        left.team_abbrev
+        and left.team_abbrev == right.team_abbrev
+        and {left.market_type, right.market_type} <= {"MONEYLINE", "PUCKLINE", "SPREAD"}
+        and "MONEYLINE" in {left.market_type, right.market_type}
+        and {left.market_type, right.market_type} & {"PUCKLINE", "SPREAD"}
+    ):
         return True
     return False
 
