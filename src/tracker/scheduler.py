@@ -15,6 +15,32 @@ logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
 
 
+def _espn_games(sport: str, day: str):
+    from src.api.espn_client import ESPN_PATH, SCOREBOARD, parse_scoreboard
+    from src.api.http_client import get_json
+
+    payload = get_json(
+        SCOREBOARD.format(path=ESPN_PATH[sport]),
+        params={"dates": day.replace("-", "")},
+        ttl_seconds=900,
+    )
+    return parse_scoreboard(payload, day)
+
+
+def find_game_id(sport: str, away: str, home: str, days: list[str]) -> str | None:
+    """Look a matchup up on the league schedule for the given days."""
+    client = NHLClient()
+    for day in days:
+        if sport == "NHL":
+            games, _appearances, _season = client.schedule(day)
+        else:
+            games = _espn_games(sport, day)
+        for game in games:
+            if game.away.abbrev.upper() == away and game.home.abbrev.upper() == home:
+                return game.game_id
+    return None
+
+
 def run_settlement_once() -> int:
     from src.api.espn_client import fetch_summary_box
 
@@ -27,7 +53,7 @@ def run_settlement_once() -> int:
 
     session = open_session()
     try:
-        return settle_pending(session, _fetch)
+        return settle_pending(session, _fetch, find_game_id)
     finally:
         session.close()
 

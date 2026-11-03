@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from config import DEFAULT_BANKROLL
 from src.api.data_models import BuiltParlay
 from src.tracker.models import BankrollState, BankrollTransaction, Parlay, ParlayLeg
+from src.tracker.resolve import LegResolver
 from src.tracker.settlement import grade_leg, rollup_ticket
 
 
@@ -131,7 +132,7 @@ def list_parlays(session: Session) -> list[Parlay]:
     )
 
 
-def settle_pending(session: Session, fetch_boxscore) -> int:
+def settle_pending(session: Session, fetch_boxscore, find_game=None) -> int:
     pending = list(
         session.scalars(
             select(Parlay)
@@ -139,27 +140,21 @@ def settle_pending(session: Session, fetch_boxscore) -> int:
             .options(selectinload(Parlay.legs))
         ).all()
     )
+    resolver = LegResolver(fetch_boxscore, find_game)
     changed = 0
     for parlay in pending:
-        boxes: dict[str, object] = {}
         for leg in parlay.legs:
             if leg.leg_status != "PENDING":
                 continue
-            if leg.game_id not in boxes:
-                try:
-                    sport = getattr(parlay, "sport", None) or "NHL"
-                    try:
-                        boxes[leg.game_id] = fetch_boxscore(leg.game_id, sport)
-                    except TypeError:
-                        boxes[leg.game_id] = fetch_boxscore(leg.game_id)
-                except Exception as exc:
-                    boxes[leg.game_id] = None
-                    leg.settlement_notes = f"Box score unavailable: {exc}"
-            status, actual, notes = grade_leg(leg, boxes[leg.game_id])
+            box, sport, game_id, note = resolver.resolve(leg, getattr(parlay, "sport", None), parlay.created_at)
+            if box is not None:
+                leg.game_id = game_id
+                leg.sport = sport
+            status, actual, notes = grade_leg(leg, box)
+            leg.settlement_notes = note or notes
             if status != "PENDING":
                 leg.leg_status = status
                 leg.actual_result = actual
-                leg.settlement_notes = notes
         new_status, profit, decimal_odds, american = rollup_ticket(parlay.legs, parlay.stake_amount)
         if new_status == parlay.status:
             continue
