@@ -76,8 +76,12 @@ def test_ledger_saves_a_paper_ticket_and_settles_it(tmp_path):
         save_parlay(session, real[0], placed_real=True, odds_source=board.odds_source)
         assert get_balance(session) == 985
 
-    def _fetch(_game_id: str):
-        return _box()
+    matchups = {leg.game_id: leg.matchup for ticket in (tickets[0], *(real[:1] if real else [])) for leg in ticket.legs}
+
+    def _fetch(game_id: str):
+        away, _, home = matchups[game_id].partition(" @ ")
+        box = _box()
+        return box.model_copy(update={"game_id": game_id, "away_abbrev": away.strip(), "home_abbrev": home.strip()})
 
     settle_pending(session, _fetch)
     summary = performance(session)
