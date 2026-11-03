@@ -90,7 +90,7 @@ def test_mixed_league_ticket_with_missing_game_ids_settles(tmp_path):
     ]
     _ticket(session, legs, sport="NHL")
 
-    settle_pending(session, _fetch, _find)
+    settle_pending(session, _fetch, find_game=_find)
 
     row = session.get(Parlay, "t")
     by_idx = {leg.id: leg for leg in row.legs}
@@ -107,7 +107,7 @@ def test_unfindable_leg_stays_pending_with_a_reason(tmp_path):
     legs = [_leg(0, game_id="", matchup="AAA @ BBB", market="TOTAL", side="OVER", line=5.5, entity="Total")]
     _ticket(session, legs)
 
-    settle_pending(session, _fetch, _find)
+    settle_pending(session, _fetch, find_game=_find)
 
     leg = session.get(Parlay, "t").legs[0]
     assert leg.leg_status == "PENDING"

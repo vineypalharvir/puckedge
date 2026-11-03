@@ -160,6 +160,8 @@ class MarketLeg(BaseModel):
     rationale: str
     tags: list[str] = Field(default_factory=list)
     selectable: bool = True
+    # League this leg belongs to (NHL, NBA, NFL). Used to route settlement per leg.
+    sport: str | None = None
 
 
 class BuiltParlay(BaseModel):
@@ -184,6 +186,8 @@ class BuiltParlay(BaseModel):
     potential_payout: float
     net_profit_if_win: float
     entry_edge: float
+    # recommended_stake as a share of bankroll after the guideline cap; kelly_fraction is the pre-cap figure.
+    recommended_pct: float | None = None
 
 
 class SkaterLine(BaseModel):
@@ -231,3 +235,4 @@ class PricedBoard(BaseModel):
     legs: list[MarketLeg]
     badges: dict[str, list[str]] = Field(default_factory=dict)
     available_books: list[str] = Field(default_factory=list)
+    prop_legs: list[MarketLeg] = Field(default_factory=list)

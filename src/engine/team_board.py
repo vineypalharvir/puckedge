@@ -6,7 +6,7 @@ import hashlib
 import math
 
 from src.api.data_models import Game, MarketLeg, Offer, SlateContext, TeamProfile, TeamSide
-from src.api.odds_client import SYNTHETIC_BOOK
+from src.api.odds_client import SYNTHETIC_BOOK, dedupe_offers
 from src.engine.devig import (
     american_to_decimal,
     american_to_implied,
@@ -20,6 +20,8 @@ HOME_EDGE = {"NFL": 2.4, "NBA": 3.0}
 MARGIN_SD = {"NFL": 13.5, "NBA": 12.0}
 TOTAL_SD = {"NFL": 10.0, "NBA": 14.0}
 LEAGUE_PPG = {"NFL": 22.5, "NBA": 114.0}
+# Games of team results needed before the stats model gets equal say with the book's price.
+PRIOR_GAMES = {"NFL": 4, "NBA": 10}
 
 # name, market, season rate. Anytime TD rate is expected touchdowns, not a yard line.
 STARS: dict[str, dict[str, list[tuple[str, str, float]]]] = {
@@ -274,6 +276,7 @@ def _prop_offers(game: Game, team: TeamProfile, opponent: TeamProfile, name: str
 
 
 def price_team_offers(context: SlateContext, offers: list[Offer]) -> list[MarketLeg]:
+    offers = dedupe_offers(offers)
     grouped: dict[str, list[Offer]] = {}
     for offer in offers:
         grouped.setdefault(offer.market_key, []).append(offer)
@@ -333,6 +336,18 @@ def price_team_offers(context: SlateContext, offers: list[Offer]) -> list[Market
 
 
 def _model_prob(sport: str, game: Game, home: TeamProfile, away: TeamProfile, offer: Offer) -> float:
+    raw = _raw_model_prob(sport, game, home, away, offer)
+    if offer.market_type not in {"MONEYLINE", "SPREAD", "TOTAL"}:
+        return raw
+    sample = min(home.games_played, away.games_played)
+    trust = sample / (sample + PRIOR_GAMES[sport])
+    blended = _clip(trust * raw + (1.0 - trust) * american_to_implied(offer.american_odds))
+    return blended
+
+
+def _raw_model_prob(sport: str, game: Game, home: TeamProfile, away: TeamProfile, offer: Offer) -> float:
+    if offer.market_type not in {"MONEYLINE", "SPREAD", "TOTAL"} and offer.team_abbrev not in {home.abbrev, away.abbrev}:
+        return _clip(american_to_implied(offer.american_odds))
     home_points, away_points = _score_pair(home, away, sport, model=True)
     margin = home_points - away_points
     if offer.market_type == "MONEYLINE":
@@ -354,6 +369,11 @@ def _model_prob(sport: str, game: Game, home: TeamProfile, away: TeamProfile, of
         opponent = away if team is home else home
         pace = (team.gf_per_game / LEAGUE_PPG[sport]) * (opponent.ga_per_game / LEAGUE_PPG[sport])
         mean = offer.line * (0.9 + 0.1 * pace)
-        over = _total_prob(mean, offer.line, sport, "OVER") if offer.line >= 20 else poisson_sf_over(max(mean, 0.2), offer.line)[0]
+        if offer.line >= 20:
+            # One player's yards or points swing about a quarter of the line game to game.
+            z_score = (offer.line - mean) / (0.25 * offer.line)
+            over = _clip(1.0 - _norm_cdf(z_score))
+        else:
+            over = poisson_sf_over(max(mean, 0.2), offer.line)[0]
         return over if offer.side == "OVER" else _clip(1.0 - over)
     return _clip(american_to_implied(offer.american_odds))

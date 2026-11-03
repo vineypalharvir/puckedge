@@ -1,6 +1,6 @@
-"""Double-click launcher for PuckEdge.
+"""Double-click launcher for DarkNode.
 
-Builds into PuckEdge.exe. Keep that file in this project folder.
+Builds into DarkNode.exe. Keep that file in this project folder.
 If Python 3.11+ is missing, the first launch downloads the official
 Windows installer and installs it for the current user, then creates
 .venv, installs requirements, and opens the app.
@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 
 
-CREDIT = "Created by Harvir Vineypal for larping purposes."
+CREDIT = "Created and Owned by Harvir Vineypal"
 PYTHON_VERSION = "3.14.8"
 MIN_VERSION = (3, 11)
 
@@ -158,7 +158,7 @@ def find_base_python() -> Path | None:
 
 
 def download_installer(url: str, dest: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "PuckEdgeSetup/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "DarkNodeSetup/1.0"})
     print(f"Downloading official Python {PYTHON_VERSION} from python.org")
     print(url)
     with urllib.request.urlopen(request, timeout=120) as response:
@@ -248,7 +248,7 @@ def ensure_base_python(finder=find_base_python, installer=install_python) -> Pat
         print(f"Using Python: {found}")
         return found
     print("Python 3.11 or newer was not found.")
-    print("PuckEdge will download and install it. First-time setup can take several minutes.")
+    print("DarkNode will download and install it. First-time setup can take several minutes.")
     print(CREDIT)
     return installer()
 
@@ -261,11 +261,11 @@ def create_venv(root: Path, base_python: Path) -> Path:
         print("The existing .venv does not run on this PC. Rebuilding it.")
         shutil.rmtree(root / ".venv", ignore_errors=True)
 
-    print("Creating the PuckEdge environment...")
+    print("Creating the DarkNode environment...")
     created = subprocess.run([str(base_python), "-m", "venv", str(root / ".venv")], check=False)
     if created.returncode != 0 or not venv_python.exists():
         raise SystemExit("Could not create the local .venv.")
-    print("Installing PuckEdge dependencies. This can take several minutes...")
+    print("Installing DarkNode dependencies. This can take several minutes...")
     installed = subprocess.run(
         [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
         check=False,
@@ -288,10 +288,10 @@ def main() -> None:
 
     root = project_root()
     os.chdir(root)
-    print("PuckEdge")
+    print("DarkNode")
     print(CREDIT)
     if not (root / "app.py").exists():
-        raise SystemExit(f"Keep PuckEdge.exe in the project folder. app.py was not found in {root}")
+        raise SystemExit(f"Keep DarkNode.exe in the project folder. app.py was not found in {root}")
     if not (root / "requirements.txt").exists():
         raise SystemExit(f"requirements.txt was not found in {root}")
 
@@ -311,7 +311,7 @@ def main() -> None:
         )
         if installed.returncode != 0:
             raise SystemExit("The update downloaded, but dependency install failed.")
-    print("Opening PuckEdge in your browser...")
+    print("Opening DarkNode in your browser...")
     command = [
         str(venv_python),
         "-m",
@@ -325,7 +325,7 @@ def main() -> None:
     ]
     code = subprocess.call(command)
     if code != 0:
-        raise SystemExit(f"PuckEdge stopped with exit code {code}.")
+        raise SystemExit(f"DarkNode stopped with exit code {code}.")
 
 
 if __name__ == "__main__":
@@ -338,6 +338,6 @@ if __name__ == "__main__":
             raise SystemExit(1)
         raise
     except Exception as exc:
-        print(f"PuckEdge could not start: {exc}")
+        print(f"DarkNode could not start: {exc}")
         pause()
         raise SystemExit(1) from exc

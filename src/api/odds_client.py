@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 
-from config import ODDS_API_BASE, ODDS_API_REGIONS, ODDS_BOOK_PRIORITY
+from config import ODDS_API_BASE, ODDS_API_KEY, ODDS_API_REGIONS, ODDS_BOOK_PRIORITY, SHARPAPI_KEY
 from src.api.data_models import Game, GoalieProfile, Offer, PlayerProfile, SlateContext, TeamProfile
 from src.api.http_client import get_json
 from src.engine.devig import implied_to_american, poisson_sf_over
@@ -25,6 +25,21 @@ def juiced_pair(fair_left: float, fair_right: float, hold: float = 0.045) -> tup
     left = _clamp(fair_left * scale, 0.04, 0.96)
     right = _clamp(fair_right * scale, 0.04, 0.96)
     return implied_to_american(left), implied_to_american(right)
+
+
+def _shade_american(price: int, delta: float) -> int:
+    """Move an American price by delta cents without landing in the invalid -99..+99 gap."""
+    moved = int(price + delta)
+    if -100 < moved < 100:
+        return 100 if delta > 0 else -100
+    return moved
+
+
+def _stable_player_id(name: str) -> int:
+    total = 0
+    for char in _norm_name(name):
+        total = (total * 33 + ord(char)) % 10_000_000
+    return total or 1
 
 
 def _norm_name(name: str) -> str:
@@ -235,7 +250,15 @@ def parse_prop_payload(payload: dict, game: Game, players: list[PlayerProfile]) 
                 continue
             for outcome in market.get("outcomes") or []:
                 description = str(outcome.get("description") or outcome.get("name") or "")
-                player = by_name.get(_norm_name(description)) or by_name.get(_norm_name(str(outcome.get("name") or "")))
+                named = description if _norm_name(description) not in {"", "over", "under", "yes", "no"} else str(outcome.get("name") or "")
+                player = by_name.get(_norm_name(description)) or by_name.get(_norm_name(named))
+                if player is None and _norm_name(named) not in {"", "over", "under", "yes", "no"}:
+                    player = PlayerProfile(
+                        player_id=_stable_player_id(named),
+                        name=named,
+                        team_abbrev="",
+                        position="",
+                    )
                 if player is None or outcome.get("price") is None:
                     continue
                 price = int(outcome["price"])
@@ -294,6 +317,47 @@ def available_books(offers: list[Offer]) -> list[str]:
     return books
 
 
+PLAYER_PROP_MARKETS = {
+    "ANYTIME_TD",
+    "GOALSCORER",
+    "PASS_YDS",
+    "RUSH_YDS",
+    "REC_YDS",
+    "POINTS",
+    "REBOUNDS",
+    "ASSISTS",
+    "THREES",
+    "SOG",
+    "SAVES",
+}
+
+
+def _prop_identity(offer: Offer) -> tuple:
+    line = None if offer.line is None else round(float(offer.line), 1)
+    return (offer.game_id, offer.market_type, _norm_name(offer.target_entity), offer.side, line)
+
+
+def pick_prop_offers(offers: list[Offer], preferred: str) -> list[Offer]:
+    """One player prop per market. Prefer the selected book, then any other book that posted it."""
+    groups: dict[tuple, list[Offer]] = {}
+    for offer in offers:
+        if offer.market_type not in PLAYER_PROP_MARKETS or not offer.selectable:
+            continue
+        if offer.bookmaker == SYNTHETIC_BOOK:
+            continue
+        groups.setdefault(_prop_identity(offer), []).append(offer)
+    picked: list[Offer] = []
+    for group in groups.values():
+        chosen = next((offer for offer in group if offer.bookmaker == preferred), None)
+        if chosen is None:
+            for book in ODDS_BOOK_PRIORITY:
+                chosen = next((offer for offer in group if offer.bookmaker == book), None)
+                if chosen is not None:
+                    break
+        picked.append(chosen or group[0])
+    return picked
+
+
 def offers_for_book(offers: list[Offer], sportsbook: str) -> list[Offer]:
     if sportsbook == SYNTHETIC_BOOK:
         return []
@@ -310,6 +374,83 @@ PROP_MARKETS = {
     "NFL": "player_pass_yds,player_rush_yds,player_reception_yds,player_anytime_td",
     "NBA": "player_points,player_rebounds,player_assists,player_threes",
 }
+GAME_MARKETS = "h2h,spreads,totals"
+# One page load asks for NHL, NFL, and NBA. Split the remaining credits across them.
+_credits_remaining: int | None = None
+_sport_slots = 3
+
+
+def _csv_parts(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def fit_odds_query(regions: str, markets: str, remaining: int) -> tuple[str, str] | None:
+    """Largest region/market pair whose product fits the credits still on the key.
+
+    The Odds API charges regions × markets. More markets are kept before extra regions.
+    """
+    region_list = _csv_parts(regions)
+    market_list = _csv_parts(markets)
+    if remaining <= 0 or not region_list or not market_list:
+        return None
+    for market_count in range(len(market_list), 0, -1):
+        for region_count in range(len(region_list), 0, -1):
+            if region_count * market_count <= remaining:
+                return ",".join(region_list[:region_count]), ",".join(market_list[:market_count])
+    return None
+
+
+def _credit_share(remaining: int) -> int:
+    global _sport_slots
+    slots = max(_sport_slots, 1)
+    share = remaining if slots == 1 else max(1, remaining // slots)
+    _sport_slots = max(slots - 1, 1)
+    return min(share, remaining)
+
+
+def _remember_credits(headers) -> None:
+    global _credits_remaining
+    if not headers:
+        return
+    raw = headers.get("x-requests-remaining")
+    if raw is None:
+        return
+    try:
+        _credits_remaining = int(raw)
+    except (TypeError, ValueError):
+        return
+
+
+def _quota_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 401:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    code = str(body.get("error_code") or "")
+    message = str(body.get("message") or "")
+    return code == "OUT_OF_USAGE_CREDITS" or "quota" in message.lower()
+
+
+def _safe_http_error(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return type(exc).__name__
+    try:
+        body = response.json()
+        detail = str(body.get("error_code") or body.get("message") or "")
+    except Exception:
+        detail = ""
+    return f"HTTP {getattr(response, 'status_code', '')} {detail}".strip()
+
+
+def _odds_get(url: str, params: dict) -> tuple[object, dict]:
+    sink: dict = {}
+    body = get_json(url, params=params, ttl_seconds=180, header_sink=sink)
+    _remember_credits(sink)
+    return body, sink
 
 
 def fetch_live_offers(
@@ -319,59 +460,131 @@ def fetch_live_offers(
     region: str | None = None,
     sport: str = "NHL",
 ) -> list[Offer]:
-    if not api_key or not games:
+    fetch_live_offers.last_note = ""
+    if not games:
+        return []
+    sharp_key = (api_key or SHARPAPI_KEY).strip()
+    if sharp_key:
+        from src.api.sharp_client import fetch_sharp_offers
+
+        try:
+            offers = fetch_sharp_offers(games, players, sharp_key, sport)
+        except Exception as exc:
+            logger.warning("SharpAPI lines failed: %s", _safe_http_error(exc))
+            fetch_live_offers.last_note = "SharpAPI did not return lines. Synthetic prices are filling the board."
+            return []
+        if not offers:
+            fetch_live_offers.last_note = "SharpAPI returned no lines for these games. Synthetic prices are filling the board."
+        elif getattr(fetch_sharp_offers, "last_note", ""):
+            fetch_live_offers.last_note = fetch_sharp_offers.last_note
+        return offers
+    if not api_key:
+        api_key = ODDS_API_KEY
+    if not api_key:
         return []
     region = region or ODDS_API_REGIONS
     sport_key = SPORT_KEYS.get(sport, SPORT_KEYS["NHL"])
     spread_type = "PUCKLINE" if sport == "NHL" else "SPREAD"
     offers: list[Offer] = []
+    regions, markets = region, GAME_MARKETS
+    if _credits_remaining is not None:
+        fitted = fit_odds_query(region, GAME_MARKETS, _credit_share(_credits_remaining))
+        if fitted is None:
+            fetch_live_offers.last_note = (
+                f"Odds API has {_credits_remaining} credits left, which is not enough for {sport} lines. "
+                "The board is using synthetic prices until the quota resets."
+            )
+            logger.warning(fetch_live_offers.last_note)
+            return []
+        regions, markets = fitted
     try:
-        payload = get_json(
+        payload, _sink = _odds_get(
             f"{ODDS_API_BASE}/sports/{sport_key}/odds",
-            params={
-                "apiKey": api_key,
-                "regions": region,
-                "markets": "h2h,spreads,totals",
-                "oddsFormat": "american",
-            },
-            ttl_seconds=180,
+            {"apiKey": api_key, "regions": regions, "markets": markets, "oddsFormat": "american"},
         )
-        offers.extend(parse_odds_payload(payload, games, spread_type))
     except Exception as exc:
-        logger.warning("Odds API game lines failed: %s", exc)
-        return []
+        if not _quota_error(exc):
+            logger.warning("Odds API game lines failed: %s", _safe_http_error(exc))
+            return []
+        response = getattr(exc, "response", None)
+        _remember_credits(getattr(response, "headers", None))
+        remaining = _credits_remaining or 0
+        fitted = fit_odds_query(region, GAME_MARKETS, _credit_share(remaining))
+        if fitted is None or fitted == (regions, markets):
+            fetch_live_offers.last_note = (
+                f"Odds API usage credits are used up ({remaining} left). "
+                "A full US/UK/EU request needs more than that, so this board is on synthetic prices."
+            )
+            logger.warning(fetch_live_offers.last_note)
+            return []
+        regions, markets = fitted
+        try:
+            payload, _sink = _odds_get(
+                f"{ODDS_API_BASE}/sports/{sport_key}/odds",
+                {"apiKey": api_key, "regions": regions, "markets": markets, "oddsFormat": "american"},
+            )
+        except Exception as retry_exc:
+            logger.warning("Odds API game lines failed: %s", _safe_http_error(retry_exc))
+            return []
+    if (regions, markets) != (region, GAME_MARKETS) and not fetch_live_offers.last_note:
+        left = _credits_remaining if _credits_remaining is not None else "unknown"
+        fetch_live_offers.last_note = (
+            f"Odds API credits are low ({left} left), so {sport} used regions {regions} and markets {markets}."
+        )
+    if fetch_live_offers.last_note:
+        logger.warning(fetch_live_offers.last_note)
+    if not isinstance(payload, list):
+        return offers
+    offers.extend(parse_odds_payload(payload, games, spread_type))
 
     try:
-        events = get_json(
+        events, _sink = _odds_get(
             f"{ODDS_API_BASE}/sports/{sport_key}/events",
-            params={"apiKey": api_key},
-            ttl_seconds=180,
+            {"apiKey": api_key},
         )
     except Exception as exc:
-        logger.warning("Odds API events failed: %s", exc)
+        logger.warning("Odds API events failed: %s", _safe_http_error(exc))
         return offers
 
     event_rows = events if isinstance(events, list) else []
+    prop_markets = PROP_MARKETS.get(sport, PROP_MARKETS["NHL"])
+    prop_cost = len(_csv_parts(regions)) * len(_csv_parts(prop_markets))
+    if (regions, markets) != (region, GAME_MARKETS):
+        logger.warning("Skipping %s player props so the remaining credits can cover the other leagues.", sport)
+        event_rows = []
     for event in event_rows:
         game = _match_game(event, games)
         if game is None or not event.get("id"):
             continue
+        if _credits_remaining is not None and _credits_remaining < prop_cost:
+            logger.warning(
+                "Skipping %s player props; %s credits left and one prop call needs %s.",
+                sport,
+                _credits_remaining,
+                prop_cost,
+            )
+            break
         try:
-            props = get_json(
+            props, _sink = _odds_get(
                 f"{ODDS_API_BASE}/sports/{sport_key}/events/{event['id']}/odds",
-                params={
+                {
                     "apiKey": api_key,
-                    "regions": region,
-                    "markets": PROP_MARKETS.get(sport, PROP_MARKETS["NHL"]),
+                    "regions": regions,
+                    "markets": prop_markets,
                     "oddsFormat": "american",
                 },
-                ttl_seconds=180,
             )
         except Exception as exc:
-            logger.warning("Player props failed for %s: %s", event.get("id"), exc)
+            logger.warning("Player props failed for %s: %s", event.get("id"), _safe_http_error(exc))
+            if _quota_error(exc):
+                break
             continue
-        offers.extend(parse_prop_payload(props, game, players))
+        if isinstance(props, dict):
+            offers.extend(parse_prop_payload(props, game, players))
     return offers
+
+
+fetch_live_offers.last_note = ""
 
 
 def _book_goal_lambdas(home: TeamProfile, away: TeamProfile) -> tuple[float, float]:
@@ -504,8 +717,8 @@ def _synthetic_game(
         fair_under = max(0.04, 1.0 - fair_over)
         over_price, under_price = _two_way_props(fair_over, fair_under)
         if distance > 0.45:
-            over_price = int(over_price + math.copysign(12, line - expected_total))
-            under_price = int(under_price - math.copysign(12, line - expected_total))
+            over_price = _shade_american(over_price, math.copysign(12, line - expected_total))
+            under_price = _shade_american(under_price, -math.copysign(12, line - expected_total))
         for side, price in (("OVER", over_price), ("UNDER", under_price)):
             offers.append(
                 _offer(
@@ -698,9 +911,21 @@ def merge_offers(live: list[Offer], synthetic: list[Offer]) -> tuple[list[Offer]
     # If a live book priced one side of a market, keep the synthetic opposite side only when
     # the live payload has no matching market key at all.
     live_keys = {offer.market_key for offer in live}
+    # A book's main total or spread replaces the synthetic one even when the lines differ.
+    game_level = {"MONEYLINE", "SPREAD", "PUCKLINE", "TOTAL"}
+    live_games = {(offer.game_id, offer.market_type) for offer in live if offer.market_type in game_level}
+    live_props = {
+        (offer.game_id, offer.market_type, _norm_name(offer.target_entity))
+        for offer in live
+        if offer.market_type not in game_level
+    }
     combined = list(live)
     for offer in synthetic:
         if offer.market_key in live_keys:
+            continue
+        if offer.market_type in game_level and (offer.game_id, offer.market_type) in live_games:
+            continue
+        if (offer.game_id, offer.market_type, _norm_name(offer.target_entity)) in live_props:
             continue
         if (offer.market_key, offer.side) in covered:
             continue
@@ -715,3 +940,16 @@ def merge_offers(live: list[Offer], synthetic: list[Offer]) -> tuple[list[Offer]
     else:
         source = next((book for book in ODDS_BOOK_PRIORITY if book in real_books), "live")
     return combined, source
+
+
+def dedupe_offers(offers: list[Offer]) -> list[Offer]:
+    """Keep one offer per book, market, and side so a repeated row cannot count twice in a devig."""
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[Offer] = []
+    for offer in offers:
+        key = (offer.bookmaker, offer.market_key, offer.side)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(offer)
+    return unique

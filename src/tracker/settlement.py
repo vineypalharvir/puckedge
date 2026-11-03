@@ -6,7 +6,8 @@ import re
 from types import SimpleNamespace
 
 from src.api.data_models import BoxScore
-from src.engine.devig import american_to_decimal, decimal_to_american
+from src.engine.devig import american_to_decimal, combine_decimal, decimal_to_american
+from src.utils.money import profit_amount, to_cents
 
 
 def _threshold(actual: float, line: float, side: str) -> str:
@@ -39,6 +40,13 @@ def _find_skater(box: BoxScore, player_id: int | None, name: str):
         if len(narrowed) == 1:
             return narrowed[0]
     return None
+
+
+def _name_matches(box: BoxScore, name: str) -> int:
+    last = name.split()[-1].casefold() if name else ""
+    if not last:
+        return 0
+    return sum(1 for skater in box.skaters if last in skater.name.casefold())
 
 
 def _find_goalie(box: BoxScore, player_id: int | None, name: str):
@@ -182,6 +190,8 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
     if market in counted:
         skater = _find_skater(box, leg.player_id, leg.target_entity)
         if skater is None:
+            if _name_matches(box, leg.target_entity) > 1:
+                return "PENDING", None, "More than one player matches that name, so the leg needs a manual check."
             return "VOID", None, "Player was not in the final box score, so the leg is void."
         key = counted[market]
         if key == "sog":
@@ -194,6 +204,9 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
             actual = float(skater.assists)
         elif key in skater.stats:
             actual = float(skater.stats[key])
+        elif key in {"PASS_YDS", "RUSH_YDS", "REC_YDS", "ANYTIME_TD"}:
+            # The player is in the box score but has no row for this category: zero.
+            actual = 0.0
         else:
             return "VOID", None, "That stat was not in the final box score, so the leg is void."
         label = key.replace("_", " ").lower()
@@ -207,21 +220,27 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
         status = _threshold(goalie.saves, line if line is not None else 0.0, side or "OVER")
         return status, float(goalie.saves), f"{goalie.name} made {goalie.saves} saves."
 
-    return "VOID", None, f"No grader for market {market}."
+    # An unknown market is not a void: voiding it would drop a possibly losing leg
+    # from the ticket. Leave it pending so it is never settled by guesswork.
+    return "PENDING", None, f"No automatic grader for market {market}; settle it manually."
 
 
 def rollup_ticket(legs, stake: float) -> tuple[str, float, float | None, int | None]:
+    """Settle a ticket from its leg statuses.
+
+    Returns (status, net profit, settled decimal odds, settled American odds).
+    A pushed or voided leg counts as decimal 1.0, so its multiplier is removed and
+    the payout is recomputed on the remaining winning legs. Only a LOST leg loses
+    the ticket. If every leg pushed or voided the stake is refunded (PUSHED).
+    """
     statuses = [leg.leg_status for leg in legs]
     if any(status == "LOST" for status in statuses):
-        return "LOST", round(-stake, 2), None, None
+        return "LOST", to_cents(-float(stake)), None, None
     if any(status == "PENDING" for status in statuses):
         return "PENDING", 0.0, None, None
     won = [leg for leg in legs if leg.leg_status == "WON"]
     if not won:
-        return "PUSHED", 0.0, None, None
-    decimal_odds = 1.0
-    for leg in won:
-        decimal_odds *= american_to_decimal(int(leg.american_odds))
+        return "PUSHED", 0.0, 1.0, None
+    decimal_odds = combine_decimal([american_to_decimal(int(leg.american_odds)) for leg in won])
     american = decimal_to_american(decimal_odds)
-    profit = round(stake * decimal_odds - stake, 2)
-    return "WON", profit, decimal_odds, american
+    return "WON", profit_amount(stake, decimal_odds), decimal_odds, american

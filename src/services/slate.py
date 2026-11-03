@@ -10,13 +10,16 @@ from src.api.data_models import PricedBoard, SlateContext, TeamProfile
 from src.api.nhl_client import NHLClient, apply_rest, apply_team_summary, select_prop_players
 from src.api.odds_client import (
     SYNTHETIC_BOOK,
+    PLAYER_PROP_MARKETS,
     available_books,
     fetch_live_offers,
     merge_offers,
     offers_for_book,
+    pick_prop_offers,
     synthetic_offers,
 )
 from src.api.espn_client import fetch_scoreboard, fetch_standings
+from src.engine.devig import is_valid_american
 from src.engine.stats_analyzer import price_offers, slate_badges
 from src.engine.team_board import LEAGUE_PPG, load_mock_team_context, price_team_offers, synthetic_team_offers
 from src.utils.mock_data import load_mock_context
@@ -25,6 +28,44 @@ logger = logging.getLogger(__name__)
 
 
 def load_board(
+    slate_date: str,
+    *,
+    prefer_live: bool = True,
+    odds_api_key: str | None = None,
+    odds_region: str | None = None,
+    sportsbook: str | None = None,
+    sport: str = "NHL",
+) -> PricedBoard:
+    """Build the priced board and tag every leg with its league for settlement routing."""
+    # #region agent log
+    import time as _t, traceback as _tb
+    from src.api.http_client import _dbg
+    _t0 = _t.monotonic()
+    _dbg("G", "slate.py:load_board", "board build start", {"sport": sport, "live": prefer_live, "has_key": bool(odds_api_key), "caller": [f"{fr.name}:{fr.lineno}" for fr in _tb.extract_stack(limit=5)[:-1]]})
+    # #endregion
+    board = _build_board(
+        slate_date,
+        prefer_live=prefer_live,
+        odds_api_key=odds_api_key,
+        odds_region=odds_region,
+        sportsbook=sportsbook,
+        sport=sport,
+    )
+    # #region agent log
+    _dbg("G", "slate.py:load_board", "board build end", {"sport": sport, "elapsed_s": round(_t.monotonic() - _t0, 1), "legs": len(board.legs), "source": board.odds_source})
+    # #endregion
+    league = sport.upper()
+    for leg in [*board.legs, *board.prop_legs]:
+        leg.sport = league
+    return board
+
+
+def _valid_offers(offers: list) -> list:
+    """Drop prices no sportsbook posts (0, NaN, or between -100 and +100)."""
+    return [offer for offer in offers if is_valid_american(offer.american_odds)]
+
+
+def _build_board(
     slate_date: str,
     *,
     prefer_live: bool = True,
@@ -56,13 +97,16 @@ def load_board(
     if key:
         try:
             live = fetch_live_offers(context.games, context.players, key, region, sport="NHL")
+            if fetch_live_offers.last_note:
+                context.notes.append(fetch_live_offers.last_note)
         except Exception as exc:
-            logger.warning("Odds feed failed: %s", exc)
-            context.notes.append(f"Odds API request failed ({exc}). Synthetic prices are filling the board.")
+            logger.warning("Odds feed failed: %s", type(exc).__name__)
+            context.notes.append("Odds API request failed. Synthetic prices are filling the board.")
     books = available_books(live) if live else [SYNTHETIC_BOOK]
     requested = sportsbook or "bet365"
     if requested not in books:
         requested = next((book for book in books if book != SYNTHETIC_BOOK), SYNTHETIC_BOOK)
+    live = _valid_offers(live)
     chosen = offers_for_book(live, requested)
     offers, odds_source = merge_offers(chosen, synthetic)
     label = BOOK_LABELS.get(requested, requested)
@@ -73,12 +117,14 @@ def load_board(
     else:
         context.notes.append(f"Showing {label} from the US, UK, and EU feeds.")
     legs = price_offers(context, offers)
+    prop_legs = _extra_prop_legs(context, live, requested, legs, price_offers)
     return PricedBoard(
         context=context,
         odds_source=requested if requested != SYNTHETIC_BOOK else odds_source,
         legs=legs,
         badges=slate_badges(context),
         available_books=books,
+        prop_legs=prop_legs,
     )
 
 
@@ -103,13 +149,16 @@ def _load_team_board(
     if key:
         try:
             live = fetch_live_offers(context.games, context.players, key, region, sport=sport)
+            if fetch_live_offers.last_note:
+                context.notes.append(fetch_live_offers.last_note)
         except Exception as exc:
-            logger.warning("%s odds feed failed: %s", sport, exc)
-            context.notes.append(f"Odds API request failed ({exc}). Synthetic prices are filling the board.")
+            logger.warning("%s odds feed failed: %s", sport, type(exc).__name__)
+            context.notes.append("Odds API request failed. Synthetic prices are filling the board.")
     books = available_books(live) if live else [SYNTHETIC_BOOK]
     requested = sportsbook or "bet365"
     if requested not in books:
         requested = next((book for book in books if book != SYNTHETIC_BOOK), SYNTHETIC_BOOK)
+    live = _valid_offers(live)
     chosen = offers_for_book(live, requested)
     offers, _source = merge_offers(chosen, synthetic)
     label = BOOK_LABELS.get(requested, requested)
@@ -117,13 +166,46 @@ def _load_team_board(
         context.notes.append(f"{sport} prices are the synthetic board until a live sportsbook is available.")
     else:
         context.notes.append(f"Showing {label} {sport} lines. Missing markets use the synthetic board.")
+    legs = price_team_offers(context, offers)
+    prop_legs = _extra_prop_legs(context, live, requested, legs, price_team_offers)
     return PricedBoard(
         context=context,
         odds_source=requested if requested != SYNTHETIC_BOOK else SYNTHETIC_BOOK,
-        legs=price_team_offers(context, offers),
+        legs=legs,
         badges={},
         available_books=books,
+        prop_legs=prop_legs,
     )
+
+
+def _extra_prop_legs(context, live: list, requested: str, legs, pricer) -> list:
+    """Player props from every book, skipping ones the selected book already priced."""
+    if not any(offer.market_type in PLAYER_PROP_MARKETS for offer in live):
+        context.notes.append(
+            "No player props came back from the odds feed. "
+            "A name that only exists on a sportsbook parlay card will not be in search. "
+            "Type that leg's odds in Check my parlay."
+        )
+        return []
+    covered = {
+        (
+            leg.game_id,
+            leg.market_type,
+            leg.target_entity.casefold(),
+            leg.side,
+            None if leg.line is None else round(float(leg.line), 1),
+        )
+        for leg in legs
+        if leg.market_type in PLAYER_PROP_MARKETS and leg.bookmaker != SYNTHETIC_BOOK
+    }
+    extra = []
+    for offer in pick_prop_offers(live, requested):
+        line = None if offer.line is None else round(float(offer.line), 1)
+        identity = (offer.game_id, offer.market_type, offer.target_entity.casefold(), offer.side, line)
+        if identity in covered:
+            continue
+        extra.append(offer)
+    return pricer(context, extra) if extra else []
 
 
 def _team_context(sport: str, slate_date: str) -> SlateContext | None:

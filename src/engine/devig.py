@@ -3,32 +3,64 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
+
+
+def is_valid_american(american: object) -> bool:
+    """A real American price is a finite number with |odds| >= 100.
+
+    Anything between -100 and +100 (including 0), None, NaN and infinity is not
+    a price any sportsbook posts, so it is rejected rather than converted.
+    """
+    if american is None or isinstance(american, bool):
+        return False
+    try:
+        value = float(american)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and abs(value) >= 100.0
+
+
+def _require_american(american: object) -> float:
+    if not is_valid_american(american):
+        raise ValueError(f"Invalid American odds: {american!r}. Prices must be +100 or higher, or -100 or lower.")
+    return float(american)  # type: ignore[arg-type]
 
 
 def american_to_decimal(american: int) -> float:
-    if american == 0:
-        raise ValueError("American odds cannot be 0")
-    if american > 0:
-        return 1.0 + american / 100.0
-    return 1.0 + 100.0 / abs(american)
+    """A >= +100: 1 + A/100. A <= -100: 1 + 100/|A|."""
+    value = _require_american(american)
+    if value > 0:
+        return 1.0 + value / 100.0
+    return 1.0 + 100.0 / abs(value)
 
 
 def decimal_to_american(decimal_odds: float) -> int:
-    if decimal_odds <= 1.0:
+    """Dec >= 2.0: +round((Dec-1)*100). Dec < 2.0: -round(100/(Dec-1)).
+
+    Decimals at or below 1.0 (or non-finite) cannot pay anything, so they map to
+    the shortest price the app uses (-10000) instead of raising mid-render.
+    """
+    try:
+        decimal_odds = float(decimal_odds)
+    except (TypeError, ValueError):
+        return -10000
+    if not math.isfinite(decimal_odds) or decimal_odds <= 1.0:
         return -10000
     if decimal_odds >= 2.0:
-        american = int(round((decimal_odds - 1.0) * 100))
+        american = int(math.floor((decimal_odds - 1.0) * 100 + 0.5))
         return max(american, 100)
-    american = int(round(-100.0 / (decimal_odds - 1.0)))
+    american = -int(math.floor(100.0 / (decimal_odds - 1.0) + 0.5))
     if american > -100:
         return -101
     return american
 
 
 def american_to_implied(american: int) -> float:
-    if american > 0:
-        return 100.0 / (american + 100.0)
-    return abs(american) / (abs(american) + 100.0)
+    value = _require_american(american)
+    if value > 0:
+        return 100.0 / (value + 100.0)
+    return abs(value) / (abs(value) + 100.0)
 
 
 def implied_to_american(probability: float) -> int:
@@ -73,16 +105,29 @@ def expected_value(model_prob: float, decimal_odds: float, push_prob: float = 0.
 
 
 def combine_decimal(decimals: list[float]) -> float:
-    total = 1.0
+    """Parlay price: the product of every leg's decimal odds.
+
+    Pushed or voided legs are passed in as 1.0, which removes their multiplier.
+    """
+    total = Decimal(1)
     for price in decimals:
-        total *= price
-    return total
+        total *= Decimal(repr(float(price)))
+    return float(total)
 
 
-def format_american(american: int) -> str:
-    if american > 0:
-        return f"+{american}"
-    return str(american)
+def format_american(american: int | None) -> str:
+    if american is None or isinstance(american, bool):
+        return "—"
+    try:
+        number = float(american)
+    except (TypeError, ValueError):
+        return "—"
+    if not math.isfinite(number):
+        return "—"
+    value = int(round(number))
+    if value > 0:
+        return f"+{value}"
+    return str(value)
 
 
 def poisson_pmf(lam: float, n: int = 14) -> list[float]:

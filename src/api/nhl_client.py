@@ -364,13 +364,13 @@ class NHLClient:
         )
 
     def club_stats(self, abbrev: str, season: int) -> tuple[list[PlayerProfile], list[GoalieProfile]]:
-        payload = get_json(f"{NHL_WEB_BASE}/club-stats/{abbrev}/{season}/2", ttl_seconds=900)
+        payload = get_json(f"{NHL_WEB_BASE}/club-stats/{abbrev}/{season}/2", ttl_seconds=3600)
         return parse_club_stats(abbrev, payload)
 
     def game_log(self, player_id: int, season: int) -> tuple[list[int], list[int], list[int]]:
         payload = get_json(
             f"{NHL_WEB_BASE}/player/{player_id}/game-log/{season}/2",
-            ttl_seconds=1800,
+            ttl_seconds=10800,
         )
         return parse_game_log(payload)
 
@@ -379,20 +379,35 @@ class NHLClient:
         return parse_boxscore(payload)
 
     def enrich_game_logs(self, players: list[PlayerProfile], season: int) -> None:
+        # #region agent log
+        import json as _j, time as _t, traceback as _tb
+        from config import ROOT as _R
+        with open(_R / "debug-90ea60.log", "a", encoding="utf-8") as _f:
+            _f.write(_j.dumps({"sessionId": "90ea60", "runId": "pre-fix", "hypothesisId": "D", "location": "nhl_client.py:enrich_game_logs", "message": "enrich start", "data": {"players": len(players), "workers": 8, "caller": [fr.name for fr in _tb.extract_stack(limit=6)[:-1]]}, "timestamp": int(_t.time() * 1000)}) + "\n")
+        # #endregion
         def _load(player: PlayerProfile) -> tuple[int, tuple[list[int], list[int], list[int]] | None]:
             try:
                 return player.player_id, self.game_log(player.player_id, season)
             except Exception as exc:
-                logger.warning("Game log failed for %s: %s", player.player_id, exc)
+                logger.debug("Game log failed for %s: %s", player.player_id, exc)
                 return player.player_id, None
 
         fetched: dict[int, tuple[list[int], list[int], list[int]]] = {}
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        # Four at a time keeps a cold load under the NHL API's per-minute allowance more often.
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [pool.submit(_load, player) for player in players]
             for future in as_completed(futures):
                 player_id, form = future.result()
                 if form and form[0]:
                     fetched[player_id] = form
+        missing = len(players) - len(fetched)
+        if missing:
+            logger.warning(
+                "Recent form is missing for %d of %d players because the NHL API is busy. "
+                "Reload in a minute to fill the rest from saved data.",
+                missing,
+                len(players),
+            )
         for player in players:
             form = fetched.get(player.player_id)
             if form:

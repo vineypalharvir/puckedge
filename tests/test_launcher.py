@@ -10,7 +10,7 @@ from launcher import (
 
 
 def test_credit_line():
-    assert CREDIT == "Created by Harvir Vineypal for larping purposes."
+    assert CREDIT == "Created and Owned by Harvir Vineypal"
 
 
 def test_python_minimum():

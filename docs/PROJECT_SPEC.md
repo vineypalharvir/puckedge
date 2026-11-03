@@ -1,4 +1,4 @@
-# PuckEdge Parlay Engine
+# DarkNode
 
 Local NHL analytics app. It prices a Bet365-compatible board, builds risk-tiered parlays, and grades every saved ticket after the games end.
 
@@ -8,7 +8,7 @@ Run it with:
 .venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Set `ODDS_API_KEY` in `.env` for live Bet365 / consensus prices. With no key, the app still runs on official NHL stats plus a synthetic Bet365 board.
+Set `SHARPAPI_KEY` in `.env` for live SharpAPI prices. With no key, the app still runs on official NHL stats plus a synthetic board.
 
 ## Stack
 
@@ -30,12 +30,12 @@ NHL, no key required:
 - `GET https://api-web.nhle.com/v1/club-stats/{team}/{season}/2`
 - `GET https://api-web.nhle.com/v1/player/{playerId}/game-log/{season}/2`
 
-Odds, optional key:
+Odds, optional SharpAPI key:
 
-- `GET https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds`
-- Book priority: bet365, draftkings, fanduel, pinnacle
-- Markets: moneyline, puck line, totals, player points, shots, anytime goal
-- Missing markets are filled by the synthetic board
+- `GET https://api.sharpapi.io/api/v1/odds` with header `X-API-Key`
+- Leagues `nhl`, `nba`, `nfl`. Main lines only: moneyline, puck line or spread, and the full-game total
+- Player props are requested only for games on the slate
+- Alternate lines are ignored. Missing markets are filled by the synthetic board
 
 ## Model
 
@@ -52,7 +52,7 @@ Odds, optional key:
 | Profile | Legs | Parlay odds | What it looks for | Min leg probability | Stake |
 | --- | --- | --- | --- | --- | --- |
 | Conservative | 2 | -120 to +160 | +1.5, team over 1.5, star over 2.5 shots | 68% | 2–3% of bankroll, quarter Kelly |
-| Balanced | 3–4 | +250 to +500 | Favorite moneylines, totals, shots and points | 56% | 1–1.5%, eighth Kelly |
+| Balanced | 2–5 | +110 to +250, aims for 40–45% to hit | Favorite moneylines, totals, shots and points | 62% | 1–1.5%, eighth Kelly |
 | Aggressive | 4–6 | +600 to +1500 | -1.5, dogs, anytime goals, team over 3.5 | 42% | 0.5% |
 | Moonshot | 6–8 | +2000 to +10000 | Goal scorers and plus-money props | 25% | 0.1–0.25%, $10 cap |
 

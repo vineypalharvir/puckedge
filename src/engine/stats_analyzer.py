@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from src.api.data_models import (
+    Game,
     GoalieProfile,
     MarketLeg,
     Offer,
@@ -19,8 +20,25 @@ from src.engine.devig import (
     multiplicative_devig,
     poisson_sf_over,
 )
+from src.api.odds_client import dedupe_offers
 from src.engine.probs import expected_team_goals, final_score_probs, over_under_from_hist
 
+# Model chance and the no-vig market price are blended as n / (n + K) on the model, where n is the
+# games of evidence behind the number: early in the season the market gets most of the say.
+PLAYER_ANCHOR_GAMES = 15
+TEAM_ANCHOR_GAMES = 15
+# Even with a large sample the model may sit at most this far from the no-vig price, or this share
+# of it, whichever is smaller, so a long shot cannot be marked up by double.
+MAX_EDGE_POINTS = 0.12
+MAX_EDGE_SHARE = 0.35
+# A per-game rate over n games is pulled toward a role average as if it came with this many extra
+# games. The averages are league-wide per-skater rates by role.
+RATE_PRIOR_GAMES = 8
+ROLE_RATES = {
+    "sog": {"F": 2.2, "D": 1.6},
+    "points": {"F": 0.65, "D": 0.30},
+    "goals": {"F": 0.27, "D": 0.07},
+}
 
 def _blended(recent: float, season: float) -> float:
     return 0.6 * recent + 0.4 * season
@@ -120,6 +138,7 @@ def slate_badges(slate: SlateContext) -> dict[str, list[str]]:
 
 
 def price_offers(slate: SlateContext, offers: list[Offer]) -> list[MarketLeg]:
+    offers = dedupe_offers(offers)
     model = ModelContext(slate)
     grouped: dict[str, list[Offer]] = {}
     for offer in offers:
@@ -144,6 +163,7 @@ def price_offers(slate: SlateContext, offers: list[Offer]) -> list[MarketLeg]:
         decimal_odds = american_to_decimal(offer.american_odds)
         implied = american_to_implied(offer.american_odds)
         fair = fair_by_id.get(id(offer), implied)
+        win, rationale = _anchor_to_market(model, game, offer, win, fair, rationale)
         ev = expected_value(win, decimal_odds, push)
         digest = hashlib.sha1(
             f"{offer.market_key}|{offer.side}|{offer.american_odds}|{offer.bookmaker}".encode()
@@ -178,6 +198,36 @@ def price_offers(slate: SlateContext, offers: list[Offer]) -> list[MarketLeg]:
             )
         )
     return legs
+
+
+def _anchor_sample(model: ModelContext, game: Game, offer: Offer) -> tuple[int, int] | None:
+    """Games of evidence behind the model number and the K to blend with, or None if the model had no stats."""
+    kind = offer.market_type
+    if kind in {"SOG", "POINTS", "GOALSCORER"} and offer.player_id in model.players and offer.line is not None:
+        return model.players[offer.player_id].games_played, PLAYER_ANCHOR_GAMES
+    if kind == "SAVES" and offer.player_id in model.goalies and offer.line is not None:
+        return model.goalies[offer.player_id].games_started, PLAYER_ANCHOR_GAMES
+    if kind in {"MONEYLINE", "MONEYLINE_REG"} or (kind in {"PUCKLINE", "TOTAL"} and offer.line is not None) or (
+        kind == "TEAM_TOTAL" and offer.line is not None and offer.team_abbrev
+    ):
+        home = model.teams[game.home.abbrev]
+        away = model.teams[game.away.abbrev]
+        return min(home.games_played, away.games_played), TEAM_ANCHOR_GAMES
+    return None
+
+
+def _anchor_to_market(model: ModelContext, game: Game, offer: Offer, win: float, fair: float, rationale: str):
+    sample = _anchor_sample(model, game, offer)
+    if sample is None:
+        return win, rationale
+    games, prior_games = sample
+    weight = max(games, 0) / (max(games, 0) + prior_games)
+    blended = weight * win + (1.0 - weight) * fair
+    cap = min(MAX_EDGE_POINTS, MAX_EDGE_SHARE * fair)
+    blended = min(max(blended, fair - cap), fair + cap)
+    blended = min(max(blended, 0.02), 0.95)
+    note = f"Chance {blended:.1%} blends {weight:.0%} model with the {fair:.1%} no-vig market price ({games} games of data)."
+    return blended, f"{rationale} {note}"
 
 
 def _model_leg(model: ModelContext, home_abbrev: str, away_abbrev: str, offer: Offer):
@@ -240,12 +290,18 @@ def _puckline_prob(matrix: dict, side: str, line: float) -> float:
     return matrix["p_home_plus_15"] if side == "HOME" else matrix["p_away_plus_15"]
 
 
+def _shrunk_rate(rate: float, player: PlayerProfile, kind: str) -> float:
+    games = max(player.games_played, 0)
+    prior = ROLE_RATES[kind]['D' if player.position == 'D' else 'F']
+    return (games * rate + RATE_PRIOR_GAMES * prior) / (games + RATE_PRIOR_GAMES)
+
+
 def _counting_prop(model: ModelContext, offer: Offer, kind: str):
     player = model.players[offer.player_id]
     opponent = model.teams.get(offer.opponent_abbrev or "")
     team = model.teams.get(player.team_abbrev)
     if kind == "sog":
-        base = _blended(player.l10_sog, player.sog_per_game)
+        base = _shrunk_rate(_blended(player.l10_sog, player.sog_per_game), player, kind)
         if opponent is not None and model.league_sa:
             base *= (opponent.shots_against_per_game / model.league_sa) ** 0.55
         if opponent is not None and player.position != "D" and opponent.penalty_kill_pct < model.league_pk:
@@ -254,14 +310,14 @@ def _counting_prop(model: ModelContext, offer: Offer, kind: str):
         season_rate = player.sog_per_game
         unit = "SOG"
     elif kind == "points":
-        base = _blended(player.l10_points, player.points_per_game)
+        base = _shrunk_rate(_blended(player.l10_points, player.points_per_game), player, kind)
         if opponent is not None and model.league_ga:
             base *= (opponent.ga_per_game / model.league_ga) ** 0.40
         recent = player.recent_points
         season_rate = player.points_per_game
         unit = "points"
     else:
-        base = _blended(player.l10_goals, player.goals_per_game)
+        base = _shrunk_rate(_blended(player.l10_goals, player.goals_per_game), player, kind)
         if opponent is not None and model.league_ga:
             base *= (opponent.ga_per_game / model.league_ga) ** 0.45
         recent = player.recent_goals
@@ -280,7 +336,7 @@ def _counting_prop(model: ModelContext, offer: Offer, kind: str):
     hit = _hit_rate(recent, offer.line or 0.5)
     pieces = [
         f"Season pace {season_rate:.2f} {unit}/game over {player.games_played} GP.",
-        f"Last 10 blend {base:.2f} after opponent adjustment.",
+        f"Projected rate {base:.2f} from the last-10 and season blend, pulled toward the role average and adjusted for the opponent.",
     ]
     if hit:
         pieces.append(hit)

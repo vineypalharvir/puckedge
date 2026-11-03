@@ -6,10 +6,36 @@ from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """Store UTC and always hand back timezone-aware UTC values.
+
+    SQLite drops tzinfo, so rows are written as naive UTC. Older rows were also
+    naive UTC, which makes reading them back as UTC exact and needs no migration.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -20,7 +46,7 @@ class Parlay(Base):
     __tablename__ = "parlays"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     risk_tier: Mapped[str] = mapped_column(String, index=True)
     total_american_odds: Mapped[int] = mapped_column(Integer)
     total_decimal_odds: Mapped[float] = mapped_column(Float)
@@ -28,7 +54,7 @@ class Parlay(Base):
     potential_payout: Mapped[float] = mapped_column(Float)
     user_placed_bet: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String, default="PENDING", index=True)
-    settled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     net_profit: Mapped[float] = mapped_column(Float, default=0.0)
     closing_line_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     rationale_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -68,6 +94,10 @@ class ParlayLeg(Base):
     bookmaker: Mapped[str | None] = mapped_column(String, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     sport: Mapped[str] = mapped_column(String, default="NHL")
+    # Filled only from real data. NULL means the feed gave no closing price, never a guess.
+    closing_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    closing_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     parlay: Mapped[Parlay] = relationship(back_populates="legs")
 
 
@@ -77,14 +107,14 @@ class BankrollState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     balance: Mapped[float] = mapped_column(Float, default=1000.0)
     initial_balance: Mapped[float] = mapped_column(Float, default=1000.0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class BankrollTransaction(Base):
     __tablename__ = "bankroll_transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     parlay_id: Mapped[str | None] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Float)
     balance_after: Mapped[float] = mapped_column(Float)

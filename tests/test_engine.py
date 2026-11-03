@@ -1,4 +1,8 @@
-from src.api.data_models import MarketLeg
+import importlib.util
+import sys
+from pathlib import Path
+
+from src.api.data_models import BuiltParlay, MarketLeg
 from src.engine.correlation import pair_conflicts, synergy, ticket_conflicts
 from src.engine.generator import PROFILES, generate_parlays
 from src.services.slate import load_board
@@ -119,3 +123,42 @@ def test_each_risk_tier_builds_parlays_from_the_mock_slate():
             assert ticket.potential_payout > ticket.stake
             assert all(leg.model_prob < 0.97 for leg in ticket.legs)
             assert ticket.exposure_warning is None or ticket.exposure_pct > 0.05
+
+
+def _foreign_market_leg():
+    """Load a second MarketLeg class from the same file, as a duplicate import would."""
+    path = Path(__file__).resolve().parents[1] / "src" / "api" / "data_models.py"
+    spec = importlib.util.spec_from_file_location("foreign_data_models_for_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.MarketLeg
+
+
+def test_aggressive_ticket_accepts_market_legs_from_another_class():
+    try:
+        foreign_cls = _foreign_market_leg()
+        board = load_board("2026-10-13", prefer_live=False)
+        foreign_legs = [foreign_cls.model_validate(leg.model_dump()) for leg in board.legs]
+        assert type(foreign_legs[0]) is not MarketLeg
+        for tier in ("Aggressive", "Moonshot", "Krazy"):
+            native = generate_parlays(board.legs, tier, bankroll=1000, stake=25)
+            tickets = generate_parlays(foreign_legs, tier, bankroll=1000, stake=25)
+            assert tickets, tier
+            assert len(tickets) == len(native)
+            for ticket, original in zip(tickets, native):
+                assert isinstance(ticket, BuiltParlay)
+                assert all(type(leg) is MarketLeg for leg in ticket.legs)
+                assert ticket.american_odds == original.american_odds
+                assert ticket.decimal_odds == original.decimal_odds
+                assert ticket.model_prob == original.model_prob
+                assert ticket.ev == original.ev
+                assert [
+                    (leg.leg_id, leg.american_odds, leg.decimal_odds, leg.model_prob)
+                    for leg in ticket.legs
+                ] == [
+                    (leg.leg_id, leg.american_odds, leg.decimal_odds, leg.model_prob)
+                    for leg in original.legs
+                ]
+    finally:
+        sys.modules.pop("foreign_data_models_for_test", None)

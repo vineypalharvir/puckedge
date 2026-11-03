@@ -1,4 +1,4 @@
-"""Pull a newer PuckEdge from GitHub without touching local secrets or the ledger."""
+"""Pull a newer DarkNode from GitHub without touching local secrets or the ledger."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-SKIP_NAMES = {".env", ".venv", "data", "PuckEdge.exe", "build", ".git", "__pycache__"}
+SKIP_NAMES = {".env", ".venv", "data", "DarkNode.exe", "PuckEdge.exe", "build", ".git", "__pycache__"}
 
 
 def update_settings(root: Path) -> tuple[str, str]:
@@ -51,7 +51,7 @@ def _write_state(root: Path, sha: str) -> None:
 def _request(url: str) -> bytes:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "PuckEdgeUpdater", "Accept": "application/vnd.github+json"},
+        headers={"User-Agent": "DarkNodeUpdater", "Accept": "application/vnd.github+json"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read()
@@ -147,7 +147,7 @@ def describe_update(root: Path) -> str:
         return "GitHub updates are off until update.json has owner/repo."
     sha = local_sha(root)
     if not sha:
-        return f"Updates: {repo}. Open PuckEdge.exe to sync."
+        return f"Updates: {repo}. Open DarkNode.exe to sync."
     return f"Updates: {repo} ({sha[:7]})."
 
 
@@ -161,7 +161,7 @@ def peek_update(root: Path) -> str:
     except Exception:
         return f"Updates: {repo} (could not reach GitHub)."
     if not local:
-        return f"Update is available on {repo}. Close this window and open PuckEdge.exe."
+        return f"Update is available on {repo}. Close this window and open DarkNode.exe."
     if local == remote:
         return f"Up to date with {repo} ({local[:7]})."
-    return f"Update available on {repo}. Close this window and open PuckEdge.exe."
+    return f"Update available on {repo}. Close this window and open DarkNode.exe."

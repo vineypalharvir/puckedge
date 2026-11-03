@@ -34,6 +34,7 @@ def configure(db_path: Path | None = None) -> sessionmaker[Session]:
 
     Base.metadata.create_all(engine)
     _ensure_sport_column(engine)
+    _ensure_leg_columns(engine)
     _engine = engine
     _bound = path
     _Session = sessionmaker(bind=engine, expire_on_commit=False)
@@ -49,6 +50,25 @@ def _ensure_sport_column(engine) -> None:
             columns = {column["name"] for column in inspector.get_columns(table)}
             if "sport" not in columns:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN sport VARCHAR DEFAULT 'NHL'"))
+
+
+# Nullable columns added after the first release. Existing rows are never rewritten.
+_LEG_COLUMNS = {
+    "closing_line": "FLOAT",
+    "closing_odds": "INTEGER",
+    "settled_at": "DATETIME",
+}
+
+
+def _ensure_leg_columns(engine) -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("parlay_legs"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("parlay_legs")}
+    with engine.begin() as connection:
+        for name, kind in _LEG_COLUMNS.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE parlay_legs ADD COLUMN {name} {kind}"))
 
 
 def open_session(db_path: Path | None = None) -> Session:

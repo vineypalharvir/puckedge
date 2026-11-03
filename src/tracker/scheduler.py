@@ -53,7 +53,7 @@ def run_settlement_once() -> int:
 
     session = open_session()
     try:
-        return settle_pending(session, _fetch, find_game_id)
+        return settle_pending(session, _fetch, find_game=find_game_id)
     finally:
         session.close()
 

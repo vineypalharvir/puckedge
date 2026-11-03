@@ -24,8 +24,10 @@ def database_path() -> Path:
 NHL_WEB_BASE = "https://api-web.nhle.com/v1"
 NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+SHARPAPI_BASE = "https://api.sharpapi.io/api/v1"
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
+SHARPAPI_KEY = os.getenv("SHARPAPI_KEY", "").strip()
 # us has DraftKings and FanDuel. uk and eu have Bet365 and Pinnacle.
 ODDS_API_REGIONS = os.getenv("ODDS_API_REGIONS", "us,uk,eu").strip() or "us,uk,eu"
 ODDS_API_REGION = ODDS_API_REGIONS
@@ -36,11 +38,14 @@ BOOK_LABELS = {
     "fanduel": "FanDuel",
     "pinnacle": "Pinnacle",
     "synthetic-bet365": "Synthetic board",
+    "typed": "Typed odds",
+    "stats": "Player stats",
+    "from stats": "from stats",
 }
 
 REQUEST_TIMEOUT = 15.0
 REQUEST_RETRIES = 3
-USER_AGENT = "PuckEdgeParlayEngine/1.0"
+USER_AGENT = "DarkNode/1.0"
 
 DEFAULT_BANKROLL = 1000.0
 DEFAULT_STAKE = 25.0

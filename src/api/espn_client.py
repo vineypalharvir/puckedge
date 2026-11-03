@@ -28,7 +28,10 @@ def _stat_map(stats: list[dict]) -> dict[str, float]:
     return found
 
 
-def parse_standings(payload: dict) -> dict[str, TeamProfile]:
+LEAGUE_DEFAULT = {"NFL": 22.5, "NBA": 114.0}
+
+
+def parse_standings(payload: dict, league_default: float = 22.0) -> dict[str, TeamProfile]:
     profiles: dict[str, TeamProfile] = {}
     groups = payload.get("children") or []
     if not groups and payload.get("standings"):
@@ -43,12 +46,18 @@ def parse_standings(payload: dict) -> dict[str, TeamProfile]:
             wins = int(stats.get("wins") or 0)
             losses = int(stats.get("losses") or 0)
             ties = int(stats.get("ties") or 0)
-            played = max(wins + losses + ties, 1)
-            points_for = stats.get("pointsFor") or stats.get("avgPointsFor") or 0
-            points_against = stats.get("pointsAgainst") or stats.get("avgPointsAgainst") or 0
-            # Season totals are large; per-game averages from ESPN are already per game when small.
-            per_game_for = points_for if points_for < played * 4 else points_for / played
-            per_game_against = points_against if points_against < played * 4 else points_against / played
+            decided = wins + losses + ties
+            played = max(decided, 1)
+            if stats.get("avgPointsFor"):
+                per_game_for = float(stats["avgPointsFor"])
+            else:
+                total_for = float(stats.get("pointsFor") or 0)
+                per_game_for = total_for / played if decided else 0.0
+            if stats.get("avgPointsAgainst"):
+                per_game_against = float(stats["avgPointsAgainst"])
+            else:
+                total_against = float(stats.get("pointsAgainst") or 0)
+                per_game_against = total_against / played if decided else 0.0
             streak = str(next((row.get("displayValue") for row in entry.get("stats") or [] if row.get("name") == "streak"), "") or "")
             profiles[abbrev] = TeamProfile(
                 abbrev=abbrev,
@@ -57,13 +66,13 @@ def parse_standings(payload: dict) -> dict[str, TeamProfile]:
                 wins=wins,
                 losses=losses,
                 ot_losses=ties,
-                gf_per_game=per_game_for or 22.0,
-                ga_per_game=per_game_against or 22.0,
+                gf_per_game=per_game_for or league_default,
+                ga_per_game=per_game_against or league_default,
                 l10_gp=min(played, 5),
                 l10_wins=wins,
                 l10_losses=losses,
-                l10_gf_per_game=per_game_for or 22.0,
-                l10_ga_per_game=per_game_against or 22.0,
+                l10_gf_per_game=per_game_for or league_default,
+                l10_ga_per_game=per_game_against or league_default,
                 streak_code=streak[:1] if streak else "",
                 streak_count=int("".join(ch for ch in streak if ch.isdigit()) or 0),
             )
@@ -124,7 +133,7 @@ def fetch_scoreboard(sport: str, slate_date: str) -> list[Game]:
 def fetch_standings(sport: str) -> dict[str, TeamProfile]:
     path = ESPN_PATH[sport]
     payload = get_json(STANDINGS.format(path=path), ttl_seconds=900)
-    return parse_standings(payload)
+    return parse_standings(payload, LEAGUE_DEFAULT.get(sport, 22.0))
 
 
 def fetch_summary_box(sport: str, event_id: str) -> BoxScore | None:
