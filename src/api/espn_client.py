@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from src.api.data_models import BoxScore, Game, SkaterLine, TeamProfile, TeamSide
@@ -179,7 +180,10 @@ def _summary_players(payload: dict) -> list[SkaterLine]:
                 stats: dict[str, float] = {}
                 for label, raw in zip(labels, values):
                     try:
-                        stats[label] = float(str(raw).split("/")[0])
+                        text = str(raw)
+                        # Made-attempted stats come as "2/5" or "2-5"; keep the made count.
+                        made = re.match(r"^(\d+)\s*[/-]\s*\d+$", text)
+                        stats[label] = float(made.group(1)) if made else float(text.split("/")[0])
                     except ValueError:
                         continue
                 row = next((item for item in players if item.name == display and item.team_abbrev == abbrev), None)

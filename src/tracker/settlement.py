@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from types import SimpleNamespace
+
 from src.api.data_models import BoxScore
 from src.engine.devig import american_to_decimal, decimal_to_american
 
@@ -29,6 +32,12 @@ def _find_skater(box: BoxScore, player_id: int | None, name: str):
     matches = [skater for skater in box.skaters if last and last in skater.name.casefold()]
     if len(matches) == 1:
         return matches[0]
+    if len(matches) > 1 and name:
+        # Two players share a last name: narrow by first initial (NHL box scores say "H. Lindholm").
+        initial = name.split()[0][:1].casefold()
+        narrowed = [s for s in matches if s.name.strip()[:1].casefold() == initial]
+        if len(narrowed) == 1:
+            return narrowed[0]
     return None
 
 
@@ -45,10 +54,63 @@ def _find_goalie(box: BoxScore, player_id: int | None, name: str):
     return starters[0] if starters else (matches[0] if matches else None)
 
 
+_CUSTOM_STATS = {
+    "AST": "ASSISTS",
+    "ASSIST": "ASSISTS",
+    "ASSISTS": "ASSISTS",
+    "PTS": "POINTS",
+    "POINT": "POINTS",
+    "POINTS": "POINTS",
+    "REB": "REBOUNDS",
+    "REBS": "REBOUNDS",
+    "REBOUNDS": "REBOUNDS",
+    "3PM": "THREES",
+    "3PT": "THREES",
+    "3S": "THREES",
+    "THREES": "THREES",
+    "SOG": "SOG",
+    "SHOTS": "SOG",
+    "GOALS": "GOALSCORER",
+    "SAVES": "SAVES",
+}
+_OVER_UNDER = re.compile(r"^(?P<name>.+?)\s+(?P<side>over|under)\s+(?P<line>\d+(?:\.\d+)?)\s+(?P<stat>[\w]+)\s*$", re.I)
+_PLUS = re.compile(r"^(?P<name>.+?)\s+(?P<line>\d+(?:\.\d+)?)\+\s+(?P<stat>[\w]+)\s*$", re.I)
+
+
+def parse_custom_selection(selection: str | None):
+    """'Rasmus Andersson Under 0.5 Ast' -> (market, side, line); '25+ Points' -> OVER 24.5."""
+    text = (selection or "").strip()
+    match = _OVER_UNDER.match(text)
+    if match:
+        market = _CUSTOM_STATS.get(match["stat"].upper())
+        if market:
+            return market, match["side"].upper(), float(match["line"])
+    match = _PLUS.match(text)
+    if match:
+        market = _CUSTOM_STATS.get(match["stat"].upper())
+        if market:
+            return market, "OVER", float(match["line"]) - 0.5
+    return None
+
+
 def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
     if box is None or not box.is_final:
         state = box.game_state if box is not None else "missing"
         return "PENDING", None, f"Game is {state}."
+
+    if leg.market_type == "CUSTOM":
+        parsed = parse_custom_selection(getattr(leg, "selection", None))
+        if parsed is None:
+            return "PENDING", None, f"Could not read the custom pick '{getattr(leg, 'selection', '')}', so it has to be settled by hand."
+        market, side, line = parsed
+        leg = SimpleNamespace(
+            market_type=market,
+            side=side,
+            line=line,
+            player_id=getattr(leg, "player_id", None),
+            target_entity=leg.target_entity,
+            team_abbrev=getattr(leg, "team_abbrev", None),
+        )
 
     market = leg.market_type
     side = leg.side
@@ -128,6 +190,8 @@ def grade_leg(leg, box: BoxScore | None) -> tuple[str, float | None, str]:
             actual = float(skater.points)
         elif key == "goals":
             actual = float(skater.goals)
+        elif key == "ASSISTS" and key not in skater.stats:
+            actual = float(skater.assists)
         elif key in skater.stats:
             actual = float(skater.stats[key])
         else:

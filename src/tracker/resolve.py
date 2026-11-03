@@ -17,7 +17,7 @@ _ONLY_IN = {
     "SAVES": ("NHL",),
     "PUCKLINE": ("NHL",),
     "REBOUNDS": ("NBA",),
-    "ASSISTS": ("NBA",),
+    "ASSISTS": ("NHL", "NBA"),
     "THREES": ("NBA",),
     "PASS_YDS": ("NFL",),
     "RUSH_YDS": ("NFL",),
