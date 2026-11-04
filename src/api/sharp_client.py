@@ -130,6 +130,11 @@ def parse_sharp_rows(
     for row in rows:
         if row.get("is_main_line") is False:
             continue
+        # The feed marks prices a book has pulled, left stale, or is only showing in-play.
+        if row.get("is_active") is False or row.get("is_stale_pregame_price") is True:
+            continue
+        if row.get("is_live") is True or row.get("is_impossible_scoreline") is True:
+            continue
         if row.get("odds_american") is None:
             continue
         game = _match_game(row, games)

@@ -554,6 +554,49 @@ def _market_fair(quotes_by_row: dict[tuple, list[Quote]], key: tuple, q: Quote) 
     return (sum(singles) / len(singles) if singles else 0.5), False
 
 
+BOTTOM_RUNG = 0.5  # the lowest line on a count prop: books post it as "1+", usually Over only
+MIN_BOOKS_FOR_BOTTOM_UNDER = 2
+
+
+def bettable_quotes(quotes: list[Quote]) -> list[Quote]:
+    """Drop player-prop Unders nobody will actually take a bet on.
+
+    The odds feed lists some Unders a book shows in its data but does not offer (for example
+    NHL "Under 0.5 assists"). Nothing in the feed marks those, so an Under is kept only when:
+
+    * it is a real price (an estimated Under is never bettable),
+    * the same book also posts the Over at that exact line (a real two-way market, not a stray
+      one-sided row), and
+    * on the bottom rung (line 0.5 or lower) at least two different books post that Under.
+
+    Overs, Yes bets and team lines pass through unchanged. Dropping a fake Under also stops it
+    from distorting the no-vig probability of the Over.
+    """
+    over_books: dict[tuple, set[str]] = {}
+    under_books: dict[tuple, set[str]] = {}
+    for q in quotes:
+        if q.is_team or q.synthetic:
+            continue
+        if q.side == "OVER":
+            over_books.setdefault(pair_id(q), set()).add(q.book)
+        elif q.side == "UNDER":
+            under_books.setdefault(pair_id(q), set()).add(q.book)
+    kept: list[Quote] = []
+    for q in quotes:
+        if q.is_team or q.side != "UNDER":
+            kept.append(q)
+            continue
+        if q.synthetic:
+            continue
+        pid = pair_id(q)
+        if q.book not in over_books.get(pid, set()):
+            continue
+        if q.line is not None and q.line <= BOTTOM_RUNG and len(under_books.get(pid, set())) < MIN_BOOKS_FOR_BOTTOM_UNDER:
+            continue
+        kept.append(q)
+    return kept
+
+
 def build_rows(
     quotes: list[Quote],
     model_probs: dict[tuple, float] | None = None,
@@ -563,7 +606,7 @@ def build_rows(
     model_probs = model_probs or {}
     series = series or {}
     grouped: dict[tuple, list[Quote]] = {}
-    for quote in quotes:
+    for quote in bettable_quotes(quotes):
         grouped.setdefault(row_key(quote), []).append(quote)
     rows: list[ScreenerRow] = []
     for key, items in grouped.items():

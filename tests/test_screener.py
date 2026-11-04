@@ -88,7 +88,7 @@ def test_model_probability_beats_the_market_when_the_board_has_one():
 def test_labels_and_milestones():
     over = sc.build_rows([q()])[0]
     assert over.selection == "Connor McDavid Over 2.5 SOG" and over.milestone == "3+"
-    under = sc.build_rows([q(side="UNDER")])[0]
+    under = next(row for row in sc.build_rows([q(), q(side="UNDER")]) if row.side == "UNDER")
     assert under.selection == "Connor McDavid Under 2.5 SOG" and under.milestone == ""
     goal = sc.build_rows([q(market="GOALSCORER", side="YES", line=0.5, american=+120)])[0]
     assert goal.selection == "Connor McDavid Anytime Goal" and goal.side == "YES"
@@ -160,7 +160,8 @@ def test_streaks_need_every_game_and_a_minimum_sample():
 def test_streak_cushion_is_average_minus_line_and_never_negative_in_the_cell():
     row = sc.build_rows([q(line=1.5)], None, series_for([4, 3, 3, 4, 3, 3]))[0]
     assert row.cushion_l10 == pytest.approx(sum([4, 3, 3, 4, 3, 3]) / 6 - 1.5)
-    under = sc.build_rows([q(side="UNDER", line=2.5)], None, series_for([1, 1, 2, 1, 0, 1]))[0]
+    two_way = [q(line=2.5), q(side="UNDER", line=2.5)]
+    under = next(row for row in sc.build_rows(two_way, None, series_for([1, 1, 2, 1, 0, 1])) if row.side == "UNDER")
     assert under.cushion_l10 == pytest.approx(2.5 - sum([1, 1, 2, 1, 0, 1]) / 6)
     from src.ui import omniscreener as ui
 
@@ -171,7 +172,7 @@ def test_streak_cushion_is_average_minus_line_and_never_negative_in_the_cell():
 
 def test_under_hit_rate_counts_games_below_the_line():
     values = [1, 2, 3, 3, 1, 2, 4, 1, 2, 2]  # below 2.5: 1,2,1,2,1,2,2 = 7
-    row = sc.build_rows([q(side="UNDER", line=2.5)], None, series_for(values))[0]
+    row = next(row for row in sc.build_rows([q(line=2.5), q(side="UNDER", line=2.5)], None, series_for(values)) if row.side == "UNDER")
     assert row.hit.l10_hits == 7
     over = sc.build_rows([q(side="OVER", line=2.5)], None, series_for(values))[0]
     assert over.hit.l10_hits == 3
@@ -233,7 +234,10 @@ def test_cents_ignore_the_even_gap():
 
 def _shop(books: dict[str, tuple[float, int]], side="OVER"):
     quotes = [q(side=side, line=line, american=price, book=book) for book, (line, price) in books.items()]
-    return sc.deck_line_shop(sc.build_rows(quotes))
+    if side == "UNDER":  # an Under is only bettable beside the same book's Over
+        quotes += [q(side="OVER", line=line, american=-110, book=book) for book, (line, _price) in books.items()]
+    rows = sc.build_rows(quotes)
+    return sc.deck_line_shop([row for row in rows if row.side == side])
 
 
 def test_line_shop_needs_two_real_books():
@@ -596,3 +600,75 @@ def test_vault_and_setup_navigation_still_work(tmp_path, monkeypatch):
     app.session_state["nav_page"] = "📊 Vault & Ledger"
     app.run()
     assert not app.exception, app.exception
+
+
+# ---------------------------------------------------------------- only bettable Unders
+
+
+def _sides(quotes):
+    return {(row.entity, row.side, row.line) for row in sc.build_rows(quotes)}
+
+
+def test_a_lone_under_with_no_over_from_the_same_book_is_hidden():
+    rows = _sides([q(side="UNDER", line=2.5, book="draftkings")])
+    assert rows == set()
+    rows = _sides([q(side="UNDER", line=2.5, book="draftkings"), q(side="OVER", line=2.5, book="fanduel")])
+    assert not any(side == "UNDER" for _, side, _ in rows)
+
+
+def test_a_bottom_rung_under_needs_two_books_to_post_it():
+    # NHL "Under 0.5 assists": DraftKings lists it, FanDuel only has the Over, so it is not bettable.
+    one_book = [
+        q(market="ASSISTS", side="OVER", line=0.5, american=+140, book="draftkings"),
+        q(market="ASSISTS", side="UNDER", line=0.5, american=-175, book="draftkings"),
+        q(market="ASSISTS", side="OVER", line=0.5, american=+150, book="fanduel"),
+    ]
+    assert not any(side == "UNDER" for _, side, _ in _sides(one_book))
+    # Two books both post the Under with an Over beside it, so it is real.
+    two_books = one_book + [q(market="ASSISTS", side="UNDER", line=0.5, american=-180, book="fanduel")]
+    assert any(side == "UNDER" for _, side, _ in _sides(two_books))
+
+
+def test_higher_line_unders_with_a_matching_over_stay():
+    quotes = [q(side="OVER", line=2.5), q(side="UNDER", line=2.5)]
+    assert {side for _, side, _ in _sides(quotes)} == {"OVER", "UNDER"}
+
+
+def test_estimated_unders_never_show_and_overs_and_team_lines_are_untouched():
+    quotes = [
+        q(side="OVER", line=2.5),
+        q(side="UNDER", line=2.5, book="synthetic-bet365"),
+        q(market="TOTAL", entity="EDM @ FLA", side="UNDER", line=6.5, american=-110),
+        q(market="TOTAL", entity="EDM @ FLA", side="OVER", line=6.5, american=-110),
+    ]
+    got = _sides(quotes)
+    assert ("Connor McDavid", "UNDER", 2.5) not in got
+    assert ("Connor McDavid", "OVER", 2.5) in got
+    assert ("EDM @ FLA", "UNDER", 6.5) in got
+
+
+def test_a_fake_under_no_longer_skews_the_over_win_chance():
+    over = q(market="ASSISTS", side="OVER", line=0.5, american=+110, book="draftkings")
+    fake_under = q(market="ASSISTS", side="UNDER", line=0.5, american=-400, book="draftkings")
+    row = sc.build_rows([over, fake_under])[0]
+    assert row.side == "OVER"
+    assert row.win_prob == pytest.approx(american_to_implied(+110) / sc.SINGLE_SIDE_HOLD)
+
+
+def test_sharp_rows_the_book_pulled_or_left_stale_are_skipped():
+    base = {
+        "sportsbook": "draftkings",
+        "event_id": "e1",
+        "home_team": "Florida Panthers",
+        "away_team": "Edmonton Oilers",
+        "market_type": "total_goals",
+        "selection": "Over",
+        "selection_type": "over",
+        "odds_american": -110,
+        "line": 6.5,
+        "is_main_line": True,
+    }
+    game = _game()
+    assert len(parse_sharp_rows([base], [game], [], "NHL")) == 1
+    for bad in ({"is_active": False}, {"is_stale_pregame_price": True}, {"is_live": True}, {"is_impossible_scoreline": True}):
+        assert parse_sharp_rows([{**base, **bad}], [game], [], "NHL") == []
